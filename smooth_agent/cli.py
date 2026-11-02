@@ -833,7 +833,11 @@ def _start_channels(args, home, log):
 
     hub_ref: dict = {}
 
+    confirm = Settings.from_config(cfg).confirm
+
     def approve(name: str, a: dict) -> bool:
+        if not confirm:  # [tools] confirm = false: the owner chose to run everything without asking
+            return True
         h = hub_ref.get("hub")
         return bool(h and h.approve(name, a))
 

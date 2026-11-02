@@ -193,10 +193,18 @@ class TelegramChannel(Channel):
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
 
-    def _api(self, method: str, payload: dict, *, timeout: float = 65.0) -> dict:
+    def _api(self, method: str, payload: dict, *, timeout: float = 65.0, tries: int = 3) -> dict:
+        """One Bot API call; a dropped connection (reset, timeout) is retried with a short backoff."""
         url = f"{TELEGRAM_API}/bot{self.token}/{method}"
-        _status, data = _post_json(url, payload, timeout=timeout)
-        return data
+        for attempt in range(tries):
+            try:
+                _status, data = _post_json(url, payload, timeout=timeout)
+                return data
+            except (urllib.error.URLError, ConnectionError, TimeoutError, OSError):
+                if attempt == tries - 1 or method == "getUpdates":  # the poll loop has its own retry
+                    raise
+                time.sleep(1.0 + attempt)
+        return {}
 
     supports_progress = True
     COMMANDS = [("new", "start a fresh conversation"), ("status", "model, session, memory"),
@@ -220,10 +228,17 @@ class TelegramChannel(Channel):
     # --- one live progress message: post it, edit it, delete it ---
     @staticmethod
     def _progress_html(text: str) -> str:
-        """First line bold, the steps as a monospace shell block."""
+        """Header bold; each step as its status mark + the step in <code> (wraps on a phone, unlike <pre>)."""
         import html
         head, _, body = text[:MAX_LEN].partition("\n")
-        return f"<b>{html.escape(head)}</b>" + (f"\n<pre>{html.escape(body)}</pre>" if body else "")
+        rows = []
+        for line in body.splitlines():
+            mark, sp, rest = line.partition(" ")
+            if mark in ("⏳", "✓", "✗") and sp:
+                rows.append(f"{mark} <code>{html.escape(rest)}</code>")
+            else:
+                rows.append(f"<i>{html.escape(line)}</i>")
+        return f"<b>{html.escape(head)}</b>" + ("\n" + "\n".join(rows) if rows else "")
 
     def post(self, chat_id: str, text: str) -> str | None:
         data = self._api("sendMessage", {"chat_id": chat_id, "text": self._progress_html(text), "parse_mode": "HTML",
@@ -740,6 +755,10 @@ def describe_step(name: str, args: dict[str, Any]) -> str:
     }
     if name in verbs:
         line = verbs[name]()
+        if name == "terminal":
+            line = "$ " + _short_command(g("command"))
+        elif name in ("web_extract", "http_get", "browser_navigate"):
+            line = line.split(" ", 1)[0] + " " + _short_url(line.split(" ", 1)[-1])
     elif name.startswith("browser_"):
         line = f"browser {name[8:]} {g('ref', 'key', 'direction')}"
     elif name.startswith("mcp_"):
@@ -747,21 +766,41 @@ def describe_step(name: str, args: dict[str, Any]) -> str:
     else:
         line = f"{name} {g('path', 'query', 'url', 'name', 'action')}"
     line = " ".join(line.split())
-    return line if len(line) <= 80 else line[:79] + "…"
+    return line if len(line) <= 64 else line[:63] + "…"
+
+
+def _short_command(cmd: str) -> str:
+    """The part of a shell command worth showing: no leading `cd dir &&`, first line of a multi-line script."""
+    import re
+    cmd = cmd.strip()
+    while True:
+        m = re.match(r"cd\s+\S+\s*(?:&&|;)\s*", cmd)
+        if not m:
+            break
+        cmd = cmd[m.end():]
+    first, _, rest = cmd.partition("\n")
+    return first.strip() + (" …" if rest.strip() else "")
+
+
+def _short_url(url: str) -> str:
+    import re
+    return re.sub(r"^https?://(www\.)?", "", url.strip()).rstrip("/")
 
 
 class Progress:
     """The live progress message of one turn: created on the first tool step, edited as steps
-    happen (throttled, Telegram allows about one edit a second), deleted when the answer is
-    sent. Also keeps the 'typing…' indicator alive on long turns."""
+    run and finish (throttled — Telegram allows about one edit a second), deleted when the
+    answer is sent. Also keeps the 'typing…' indicator alive on long turns."""
 
     SHOW = 8          # last N steps on screen
-    EDIT_EVERY = 1.5  # seconds between edits
+    EDIT_EVERY = 1.5  # seconds between edits for new steps
+    TIMER_EVERY = 5.0  # refresh the clock this often when nothing else changed
     TYPING_EVERY = 4.5
+    MARK = {"run": "⏳", "ok": "✓", "err": "✗"}
 
     def __init__(self, channel: "Channel", chat_id: str, *, log: Callable[[str], None] = print):
         self.channel, self.chat_id, self.log = channel, chat_id, log
-        self.lines: list[str] = []
+        self.steps: list[list[str]] = []  # [state, line]
         self.msg_id: str | None = None
         self._dirty = False
         self._last_edit = 0.0
@@ -771,26 +810,32 @@ class Progress:
         self._thread = threading.Thread(target=self._tick, name="progress", daemon=True)
         self._thread.start()
 
+    @property
+    def lines(self) -> list[str]:
+        return [f"{self.MARK[st]} {ln}" for st, ln in self.steps]
+
     def on_event(self, event: str, data: dict[str, Any]) -> None:
         with self._lock:
-            if event == "tool":
-                self.lines.append(describe_step(data.get("name", ""), data.get("arguments") or {}))
-            elif event == "sub:tool":
-                self.lines.append("  ↳ " + describe_step(data.get("name", ""), data.get("arguments") or {}))
+            if event in ("tool", "sub:tool"):
+                line = describe_step(data.get("name", ""), data.get("arguments") or {})
+                self.steps.append(["run", ("↳ " if event == "sub:tool" else "") + line])
             elif event in ("tool_result", "sub:tool_result"):
                 res = str(data.get("result", ""))
-                if self.lines and res.startswith(("error", "denied", "cancelled")):
-                    self.lines[-1] += "  ✗"
+                failed = res.startswith(("error", "denied", "cancelled")) or res.startswith("[exit ") and not res.startswith("[exit 0]")
+                for step in reversed(self.steps):
+                    if step[0] == "run":
+                        step[0] = "err" if failed else "ok"
+                        break
             elif event == "compressed":
-                self.lines.append("🗜 summarising the earlier conversation")
+                self.steps.append(["ok", "summarised the earlier conversation"])
             else:
                 return
             self._dirty = True
 
     def _render(self) -> str:
-        n = len(self.lines)
+        n = len(self.steps)
         shown = self.lines[-self.SHOW:]
-        head = f"⏳ working… {int(time.time() - self._t0)}s"  # Telegram shows the lines as a shell block
+        head = f"⚙️ Working · {int(time.time() - self._t0)}s"
         more = [f"… {n - len(shown)} earlier steps"] if n > len(shown) else []
         return "\n".join([head, *more, *shown])
 
@@ -803,7 +848,8 @@ class Progress:
                     self.channel.typing(self.chat_id)
                     last_typing = now
                 with self._lock:
-                    due = self._dirty and now - self._last_edit >= self.EDIT_EVERY
+                    since = now - self._last_edit
+                    due = (self._dirty and since >= self.EDIT_EVERY) or (self.msg_id is not None and since >= self.TIMER_EVERY)
                     text = self._render() if due else ""
                     if due:
                         self._dirty = False
@@ -835,6 +881,20 @@ HELP = (
     "/stop — stop what I'm doing\n"
     "/help — this message"
 )
+
+
+def approval_text(name: str, args: dict[str, Any]) -> str:
+    """A short, readable approval question (Markdown) instead of raw JSON."""
+    what = args.get("command") or args.get("code") or args.get("path")
+    if name.startswith("files: "):
+        return f"🔐 Allow me to {name[7:]}?\n`{args.get('path', '')}`"
+    if what:
+        body = str(what)
+        body = body if len(body) <= 1500 else body[:1500] + "\n…"
+        label = {"terminal": "Run this command", "execute_code": "Run this code"}.get(name, f"Allow {name}")
+        return f"🔐 {label}?\n```\n{body}\n```"
+    preview = json.dumps(args, ensure_ascii=False)
+    return f"🔐 Allow {name}?\n`{preview[:500]}`"
 
 
 class ChannelHub:
@@ -903,12 +963,9 @@ class ChannelHub:
         channel, chat_id = active
         if channel.cfg.auto_approve:
             return True
-        preview = json.dumps(args, ensure_ascii=False)
-        if len(preview) > 500:
-            preview = preview[:500] + "…"
         key = uuid.uuid4().hex[:12]
         pending = self._pending[key] = _Pending(threading.Event())
-        text = f"Run `{name}`?\n{preview}"
+        text = approval_text(name, args)
         minutes = max(1, round(self.approval_timeout / 60))
         try:
             if channel.supports_buttons:

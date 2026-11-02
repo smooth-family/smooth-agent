@@ -140,11 +140,39 @@ class RenderTests(unittest.TestCase):
         self.assertEqual(describe_step("write_file", {"path": "app.py", "content": "x"}), "write app.py")
         self.assertEqual(describe_step("read_file", {"path": "/etc/hosts"}), "read /etc/hosts")
         self.assertEqual(describe_step("patch", {"path": "a.toml"}), "edit a.toml")
-        self.assertEqual(describe_step("web_extract", {"urls": ["https://a.b"]}), "open https://a.b")
+        self.assertEqual(describe_step("web_extract", {"urls": ["https://a.b"]}), "open a.b")
         self.assertEqual(describe_step("execute_code", {"code": "import os\nprint(1)"}), "python import os")
         self.assertEqual(describe_step("browser_click", {"ref": "@e1"}), "click @e1")
         self.assertEqual(describe_step("mcp_github_list_prs", {}), "mcp github_list_prs")
         self.assertTrue(describe_step("web_search", {"query": "q" * 200}).endswith("…"))
+
+
+class StepTextTests(unittest.TestCase):
+    def test_phone_friendly_steps(self):
+        self.assertEqual(describe_step("terminal", {"command": "cd /tmp && curl -s https://x.y/app.js | head -c 300"}),
+                         "$ curl -s https://x.y/app.js | head -c 300")
+        self.assertEqual(describe_step("terminal", {"command": "cd /a; cd /b && python3 -c \"\nimport re\nprint(1)\""}),
+                         '$ python3 -c " …')
+        self.assertEqual(describe_step("web_extract", {"urls": ["https://smooth.family/"]}), "open smooth.family")
+        self.assertEqual(describe_step("http_get", {"url": "https://www.example.com/api/v1"}), "fetch example.com/api/v1")
+        self.assertLessEqual(len(describe_step("terminal", {"command": "echo " + "x" * 300})), 64)
+
+    def test_progress_html_wraps_on_phones(self):
+        from smooth_agent.channels import TelegramChannel
+        html = TelegramChannel._progress_html("⚙️ Working · 4s\n✓ $ git pull\n⏳ read <a>.md\n… 3 earlier steps")
+        self.assertTrue(html.startswith("<b>⚙️ Working · 4s</b>"))
+        self.assertIn("✓ <code>$ git pull</code>", html)
+        self.assertIn("⏳ <code>read &lt;a&gt;.md</code>", html)
+        self.assertIn("<i>… 3 earlier steps</i>", html)
+        self.assertNotIn("<pre>", html)
+
+    def test_approval_text_is_readable(self):
+        from smooth_agent.channels import approval_text
+        t = approval_text("terminal", {"command": "rm -rf build"})
+        self.assertIn("Run this command?", t)
+        self.assertIn("```\nrm -rf build\n```", t)
+        self.assertNotIn("{", t)
+        self.assertIn("`/etc/hosts`", approval_text("files: write outside the workspace", {"path": "/etc/hosts"}))
 
 
 class ProgressTests(unittest.TestCase):
@@ -159,8 +187,20 @@ class ProgressTests(unittest.TestCase):
         self.assertTrue(wait_for(lambda: ch.edits))
         p.finish()
         self.assertIn("search berita AI", ch.posts[0])
-        self.assertIn("read a.md  ✗", ch.edits[-1])
+        self.assertIn("✗ read a.md", ch.edits[-1])
+        self.assertIn("⏳ search berita AI", ch.edits[-1])  # no result yet: still running
         self.assertEqual(ch.deleted, ["m1"])
+
+    def test_failed_command_is_marked(self):
+        ch = ProgressChannel()
+        p = Progress(ch, "1", log=lambda m: None)
+        p.on_event("tool", {"name": "terminal", "arguments": {"command": "false"}})
+        p.on_event("tool_result", {"name": "terminal", "result": "[exit 1]\n"})
+        p.on_event("tool", {"name": "terminal", "arguments": {"command": "true"}})
+        self.assertEqual(p.lines, ["✗ $ false", "⏳ $ true"])
+        p.on_event("tool_result", {"name": "terminal", "result": "[exit 0]\n"})
+        self.assertEqual(p.lines[-1], "✓ $ true")
+        p.finish()
 
     def test_no_message_when_no_tools(self):
         ch = ProgressChannel()
