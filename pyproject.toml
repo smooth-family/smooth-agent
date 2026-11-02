@@ -1,0 +1,44 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "smooth-agent"
+version = "0.3.0"
+description = "Self-hostable, multi-router AI agent with tools, skills and sub-agents."
+requires-python = ">=3.9"
+license = { text = "MIT" }
+authors = [{ name = "Smooth" }]
+readme = "README.md"
+dependencies = [
+    # tomllib is stdlib on 3.11+; tomli is the backport for 3.9/3.10.
+    "tomli>=2.0; python_version < '3.11'",
+]
+
+[project.optional-dependencies]
+browser = ["playwright>=1.40"]
+dev = ["playwright>=1.40"]
+
+[project.urls]
+Homepage = "https://github.com/smooth-family/smooth-agent"
+
+[project.scripts]
+smooth-agent = "smooth_agent.cli:main"
+
+[tool.setuptools]
+packages = ["smooth_agent"]
+include-package-data = true
+license-files = ["LICENSE", "THIRD_PARTY_NOTICES.md"]
+
+[tool.setuptools.package-data]
+# bundled skills (Markdown playbooks + their reference files and scripts)
+smooth_agent = ["skills/**/*", "data/*"]
+
+[tool.ruff]
+line-length = 120
+target-version = "py39"
+exclude = ["smooth_agent/skills"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B"]
+ignore = ["E501"]

@@ -1,0 +1,74 @@
+---
+name: smooth-agent
+description: How Smooth Agent itself works and is configured — providers, keys, tools, skills, workspace, MCP, browser, troubleshooting.
+version: 1.0.0
+platforms: [linux, macos, windows]
+metadata:
+  smooth:
+    tags: [smooth-agent, config, setup, help]
+    category: smooth-agent
+---
+
+# Smooth Agent: setup and configuration
+
+Use this when the owner asks how to set something up, change a provider or model,
+turn a tool on, or why something does not work.
+
+## Files
+
+- `~/.smooth-agent/config.toml` — providers, `[agent]`, `[tools]`, `[browser]`,
+  `[vision]`, `[image]`, `[tts]`, `[mcp]` (a `smooth-agent.toml` in the current
+  folder wins over it).
+- `~/.smooth-agent/.env` — keys (`DEEPSEEK_API_KEY=…`, `OPENAI_API_KEY=…`,
+  `ANTHROPIC_API_KEY=…`, `GLM_API_KEY=…`, `GITHUB_TOKEN=…`, …). Loaded at start.
+- `~/.smooth-agent/skills/` — the owner's skills; `mcp.json` — MCP servers;
+  `processes/` — logs of background commands.
+- The workspace (`[agent] workspace`, default `./workspace`) is the only folder
+  the file tools can touch.
+
+## Providers
+
+```toml
+default = "main"
+fallbacks = ["backup"]          # tried in order when the default fails
+
+[providers.main]
+provider = "deepseek"           # openai, anthropic, deepseek, glm, groq, openrouter, kimi,
+model = "deepseek-chat"         # smooth-router, 9router, openai-compatible (+ base_url)
+
+[providers.backup]
+provider = "openai-compatible"
+base_url = "http://127.0.0.1:11434/v1"   # e.g. a local model server
+model = "qwen3:8b"
+```
+
+`smooth-agent providers` lists them; `smooth-agent doctor --ping` tests the default.
+
+## Turning tools on
+
+```toml
+[tools]
+terminal = true      # shell + Python + background processes (asks first unless confirm = false)
+search = "auto"      # set TAVILY_API_KEY / BRAVE_API_KEY / SEARXNG_URL for better search
+optional_skills = false
+enable_skills = ["sherlock"]
+
+[browser]
+enabled = true       # pip install "smooth-agent[browser]" && python -m playwright install chromium
+
+[image]
+provider = "main"
+model = "gpt-image-1"
+```
+
+## Skills
+
+`smooth-agent skills list|search <words>|install <name|git-url|path>|remove <name>`.
+The agent can also write its own with the `skill_manage` tool.
+
+## Troubleshooting
+
+- "no key" → add the variable to `~/.smooth-agent/.env`.
+- Tool missing → it is off in `[tools]` / `[browser]` / not configured (`[image]`, `[tts]`).
+- Model errors 429/5xx → add a provider to `fallbacks`.
+- MCP problems → the `native-mcp` skill.

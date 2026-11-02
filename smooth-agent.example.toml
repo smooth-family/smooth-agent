@@ -1,0 +1,64 @@
+# Smooth Agent config. `smooth-agent setup` writes this to ~/.smooth-agent/config.toml.
+# Secrets never go here: put keys in ~/.smooth-agent/.env (or your environment) and
+# name the variable with key_env. `default` is used unless you pass -p; `fallbacks`
+# are tried in order when it fails.
+default = "main"
+# fallbacks = ["backup"]
+
+[providers.main]
+provider = "deepseek"        # PROVIDER
+model = "deepseek-chat"       # MODEL
+# presets: openai, anthropic, deepseek, glm, groq, openrouter, kimi, smooth-router, 9router, openai-compatible
+# the key is read from the preset's env var (DEEPSEEK_API_KEY, OPENAI_API_KEY, ANTHROPIC_API_KEY, GLM_API_KEY, ...)
+
+# [providers.backup]
+# provider = "smooth-router"   # or "9router", or "openai-compatible" with base_url
+# model = "anthropic/claude-haiku-5-5"
+# base_url = "http://127.0.0.1:20150/v1"
+# key_env = "SMOOTH_ROUTER_KEY"
+
+[agent]
+# workspace = "~/smooth-workspace"   # the folder the agent reads and writes (default ./workspace)
+max_steps = 12                        # tool rounds per message
+max_tokens = 1536
+# instructions = "Answer in Indonesian. Keep replies short."
+
+[tools]
+http = true            # web_search, web_extract, http_get
+search = "auto"        # auto: Tavily / Brave / SearXNG when TAVILY_API_KEY / BRAVE_API_KEY / SEARXNG_URL is set, else DuckDuckGo
+terminal = false       # shell commands + Python on this machine (as your user), and background processes
+confirm = true         # ask before every terminal / execute_code call
+timeout = 180          # seconds per command
+delegate = true        # delegate_task: parallel sub-agents
+skills = true
+optional_skills = false
+# enable_skills = ["sherlock", "evm"]   # turn on single optional skills
+# skill_dirs = ["~/my-skills"]
+
+[browser]
+enabled = false        # needs: pip install "smooth-agent[browser]" && python -m playwright install chromium
+headless = true
+# profile_dir = ""     # default ~/.smooth-agent/browser/profile (keeps logins); "none" = fresh every run
+
+[vision]               # image understanding; defaults to the main provider/model
+# provider = "anthropic"
+# model = "claude-haiku-5-5"
+
+# [image]              # image generation (OpenAI-compatible /images/generations)
+# provider = "openai"
+# model = "gpt-image-1"
+
+# [tts]                # text to speech (OpenAI-compatible /audio/speech)
+# provider = "openai"
+# model = "gpt-4o-mini-tts"
+# voice = "alloy"
+
+[mcp]
+confirm = false        # ask before every MCP tool call
+# [mcp.servers.github]
+# command = "npx"
+# args = ["-y", "@modelcontextprotocol/server-github"]
+# env = { GITHUB_PERSONAL_ACCESS_TOKEN = "${GITHUB_TOKEN}" }
+# [mcp.servers.remote]
+# url = "https://example.com/mcp"
+# headers = { Authorization = "Bearer ${REMOTE_MCP_TOKEN}" }
