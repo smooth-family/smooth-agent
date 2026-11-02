@@ -215,35 +215,74 @@ def _cmd_run(args) -> int:
 # ---------- setup / doctor ----------
 
 def _cmd_setup(args) -> int:
+    from .banner import Steps, bold, cyan, dim, print_banner
     home = ensure_home()
     cfg_path = home / "config.toml"
     example = Path(__file__).parent / "data" / "config.example.toml"
-    print(f"Smooth Agent home: {home}")
-    if cfg_path.exists() and not args.force:
-        print(f"config already exists: {cfg_path} (use --force to start over)")
+    interactive = sys.stdin.isatty()
+    print_banner(__version__)
+    print(f"  {dim('home')}  {home}")
+    steps = Steps(4)
+
+    steps.start("Model provider")
+    keep = cfg_path.exists() and not args.force
+    provider = model = ""
+    if keep:
+        steps.ok(f"keeping {cfg_path}")
+        steps.note("run `smooth-agent setup --force` to start over")
     else:
-        provider = args.provider or _ask("LLM provider", "deepseek", choices=[k for k in PRESETS if k != "openai-compatible"])
-        preset = PRESETS[provider]
+        choices = [k for k in PRESETS if k != "openai-compatible"]
+        if interactive and not args.provider:
+            steps.note("options: " + ", ".join(choices))
+        provider = args.provider or _ask("        provider", "deepseek", choices=choices)
         default_models = {"openai": "gpt-5-mini", "anthropic": "claude-haiku-5-5", "deepseek": "deepseek-chat",
                           "glm": "glm-4.6", "groq": "llama-3.3-70b-versatile", "openrouter": "anthropic/claude-haiku-5-5",
                           "kimi": "kimi-k2-turbo-preview", "smooth-router": "anthropic/claude-haiku-5-5", "9router": "cc/claude-haiku-5-5"}
-        model = args.model or _ask("model", default_models.get(provider, ""))
+        model = args.model or _ask("        model", default_models.get(provider, ""))
         text = example.read_text(encoding="utf-8")
         text = text.replace('provider = "deepseek"        # PROVIDER', f'provider = "{provider}"').replace('model = "deepseek-chat"       # MODEL', f'model = "{model}"')
         cfg_path.write_text(text, encoding="utf-8")
-        print(f"wrote {cfg_path}")
-        key_env = preset.get("key_env")
-        if key_env and not os.environ.get(key_env):
-            key = args.key if args.key is not None else _ask(f"{key_env} (leave empty to set later)", "", secret=True)
-            if key:
-                set_env_value(key_env, key)
-                print(f"saved {key_env} to {home / '.env'} (mode 600)")
-            else:
-                print(f"set it later: smooth-agent setup --key ... or add {key_env}=... to {home / '.env'}")
+        steps.ok(f"{bold(provider)} · {model}")
+        steps.note(f"wrote {cfg_path}")
+
+    steps.start("API key")
+    key_env = PRESETS[provider].get("key_env") if provider else None
+    if keep:
+        steps.ok("unchanged")
+    elif not key_env:
+        steps.ok("this provider needs no key")
+    elif os.environ.get(key_env):
+        steps.ok(f"{key_env} found in the environment")
+    else:
+        key = args.key if args.key is not None else _ask(f"        {key_env} (blank = later)", "", secret=True)
+        if key:
+            set_env_value(key_env, key)
+            steps.ok(f"saved {key_env} to {home / '.env'} (mode 600)")
+        else:
+            steps.warn(f"no key yet — add {key_env}=… to {home / '.env'} or rerun with --key")
+
+    steps.start("Chat channels")
     (home / "skills").mkdir(exist_ok=True)
-    if sys.stdin.isatty() and not getattr(args, "no_channels", False):
-        _setup_channels(home, cfg_path)
-    print("\nnext: smooth-agent doctor   then   smooth-agent run")
+    names: list[str] = []
+    if getattr(args, "channels", None) is not None:
+        names = _setup_channels(cfg_path, args.channels, steps, interactive=False)
+    elif interactive and not getattr(args, "no_channels", False):
+        names = _setup_channels(cfg_path, None, steps, interactive=True)
+    if not names:
+        steps.ok("skipped — terminal only for now")
+        steps.note("add later: smooth-agent setup --channels telegram")
+
+    steps.start("Ready")
+    nexts = [("smooth-agent doctor", "check what works on this machine"), ("smooth-agent run", "talk to your agent")]
+    if names and Path("/.dockerenv").exists():
+        nexts += [("docker compose up -d", f"start {', '.join(names)} + scheduled jobs")]
+    elif names:
+        nexts += [("smooth-agent daemon", f"start {', '.join(names)} + scheduled jobs"),
+                  ("smooth-agent service --install", "keep it running after reboot")]
+    width = max(len(c) for c, _ in nexts)
+    for cmd, what in nexts:
+        steps.ok(f"{cyan(cmd.ljust(width))}   {what}")  # pad before colouring so columns line up
+    print()
     return 0
 
 
@@ -261,39 +300,58 @@ def _strip_channels_table(text: str) -> str:
     return "".join(out)
 
 
-def _setup_channels(home: Path, cfg_path: Path) -> None:
-    """Optional: pick chat channels and wire the first one (interactive only)."""
+# what each channel needs, for the config table and the "fill these in" hints
+_CHANNEL_TABLES = {
+    "telegram": ('token_env = "TELEGRAM_BOT_TOKEN"\nowners = {owners}\nauto_approve = false\n',
+                 "TELEGRAM_BOT_TOKEN (from @BotFather) and your numeric id in owners"),
+    "whatsapp": ('token_env = "WHATSAPP_TOKEN"\nphone_id = ""\nverify_token = ""\nowners = {owners}\n',
+                 "WHATSAPP_TOKEN, phone_id, verify_token; webhook -> <host>:8808/webhook/whatsapp"),
+    "wechat": ('webhook_url_env = "WECHAT_ROBOT_URL"\nowners = ["robot"]\n', "WECHAT_ROBOT_URL (group robot)"),
+    "slack": ('token_env = "SLACK_BOT_TOKEN"\nsigning_secret_env = "SLACK_SIGNING_SECRET"\nowners = {owners}\n',
+              "SLACK_BOT_TOKEN, SLACK_SIGNING_SECRET; events -> <host>:8808/webhook/slack"),
+    "matrix": ('homeserver = "https://matrix.org"\ntoken_env = "MATRIX_TOKEN"\nowners = {owners}\n',
+               "MATRIX_TOKEN (bot access token), homeserver, your @id in owners"),
+    "line": ('token_env = "LINE_CHANNEL_TOKEN"\nsecret_env = "LINE_CHANNEL_SECRET"\nowners = {owners}\n',
+             "LINE_CHANNEL_TOKEN, LINE_CHANNEL_SECRET; webhook -> <host>:8808/webhook/line"),
+    "discord": ('webhook_url_env = "DISCORD_WEBHOOK_URL"\n', "DISCORD_WEBHOOK_URL (channel webhook)"),
+}
+
+
+def _setup_channels(cfg_path: Path, pick: str | None, steps, *, interactive: bool) -> list[str]:
+    """Pick chat channels and write their [channels.*] tables. Returns the names enabled."""
     from .channels import CHANNEL_TYPES
-    print(f"chat channels available: {', '.join(CHANNEL_TYPES)}")
-    pick = _ask("channels to enable (comma-separated, blank to skip)", "", choices=None)
-    names = [n.strip().lower() for n in pick.split(",") if n.strip().lower() in CHANNEL_TYPES]
+    if pick is None:
+        steps.note("available: " + ", ".join(CHANNEL_TYPES))
+        pick = _ask("        enable (comma-separated, blank = skip)", "")
+    names, unknown = [], []
+    for n in (x.strip().lower() for x in str(pick).split(",") if x.strip()):
+        (names if n in CHANNEL_TYPES else unknown).append(n)
+    names = list(dict.fromkeys(names))
+    for n in unknown:
+        steps.warn(f"unknown channel '{n}' (have: {', '.join(CHANNEL_TYPES)})")
     if not names:
-        return
-    cfg_path.write_text(_strip_channels_table(cfg_path.read_text(encoding="utf-8")), encoding="utf-8")
-    blocks = [f'\n[channels]\nenabled = {json.dumps(names)}\nwebhook_host = "0.0.0.0"\nwebhook_port = 8808\n']
-    if "telegram" in names:
-        token = _ask("TELEGRAM_BOT_TOKEN (from @BotFather)", "", secret=True)
+        return []
+    owners: dict[str, str] = {}
+    if interactive and "telegram" in names:
+        token = _ask("        TELEGRAM_BOT_TOKEN (blank = later)", "", secret=True)
         if token:
             set_env_value("TELEGRAM_BOT_TOKEN", token)
-        owner = _ask("your Telegram numeric id (message the bot once if unsure)", "")
-        owners = f'["{owner}"]' if owner else "[]"
-        blocks.append(f'\n[channels.telegram]\ntoken_env = "TELEGRAM_BOT_TOKEN"\nowners = {owners}\nauto_approve = false\n')
-    if "whatsapp" in names:
-        blocks.append('\n[channels.whatsapp]\ntoken_env = "WHATSAPP_TOKEN"\nphone_id = ""\nverify_token = ""\nowners = []\n')
-    if "wechat" in names:
-        blocks.append('\n[channels.wechat]\nwebhook_url_env = "WECHAT_ROBOT_URL"\nowners = ["robot"]\n')
-    if "slack" in names:
-        blocks.append('\n[channels.slack]\ntoken_env = "SLACK_BOT_TOKEN"\nsigning_secret_env = "SLACK_SIGNING_SECRET"\nowners = []\n')
-    if "matrix" in names:
-        blocks.append('\n[channels.matrix]\nhomeserver = "https://matrix.org"\ntoken_env = "MATRIX_TOKEN"\nowners = []\n')
-    if "line" in names:
-        blocks.append('\n[channels.line]\ntoken_env = "LINE_CHANNEL_TOKEN"\nsecret_env = "LINE_CHANNEL_SECRET"\nowners = []\n')
-    if "discord" in names:
-        blocks.append('\n[channels.discord]\nwebhook_url_env = "DISCORD_WEBHOOK_URL"\n')
-    with open(cfg_path, "a", encoding="utf-8") as fh:
-        fh.write("".join(blocks))
-    print(f"added [channels] for {', '.join(names)} to {cfg_path}")
-    print("fill any blanks, then: smooth-agent daemon")
+            steps.ok("saved TELEGRAM_BOT_TOKEN to .env")
+        owner = _ask("        your Telegram numeric id (blank = later)", "")
+        if owner:
+            owners["telegram"] = owner
+    text = _strip_channels_table(cfg_path.read_text(encoding="utf-8")).rstrip("\n") + "\n"
+    text += f'\n[channels]\nenabled = {json.dumps(names)}\nwebhook_host = "0.0.0.0"\nwebhook_port = 8808\n'
+    for n in names:
+        body, _hint = _CHANNEL_TABLES[n]
+        text += f"\n[channels.{n}]\n" + body.replace("{owners}", json.dumps([owners[n]] if n in owners else []))
+    cfg_path.write_text(text, encoding="utf-8")
+    steps.ok("enabled " + ", ".join(names))
+    for n in names:
+        steps.note(f"{n}: {_CHANNEL_TABLES[n][1]}")
+    if any(n not in owners and n not in ("wechat", "discord") for n in names):
+        steps.note("tip: message your bot once — it replies with the id to put in owners")
+    return names
 
 
 def _ask(label: str, default: str, *, choices: list[str] | None = None, secret: bool = False) -> str:
@@ -318,7 +376,8 @@ def _ask(label: str, default: str, *, choices: list[str] | None = None, secret: 
 
 
 def _cmd_doctor(args) -> int:
-    ok = lambda b: "ok " if b else "-- "  # noqa: E731
+    from .banner import dim, green
+    ok = lambda b: green("ok ") if b else dim("-- ")  # noqa: E731
     home = agent_home()
     load_dotenv(home / ".env")
     print(f"smooth-agent {__version__} on Python {sys.version.split()[0]} ({sys.platform})")
@@ -335,11 +394,11 @@ def _cmd_doctor(args) -> int:
         if args.ping:
             try:
                 c = router.complete([{"role": "user", "content": "Reply with: ok"}], max_tokens=10)
-                print(f"ok  ping        {c.provider} answered in {c.first_ms} ms: {c.text.strip()[:40]!r}")
+                print(f"{ok(True)} ping        {c.provider} answered in {c.first_ms} ms: {c.text.strip()[:40]!r}")
             except RouterError as e:
-                print(f"--  ping        {e}")
+                print(f"{ok(False)} ping        {e}")
     except RouterError as e:
-        print(f"--  providers   {e}")
+        print(f"{ok(False)} providers   {e}")
     st = Settings.from_config(cfg)
     from .browser import BrowserSettings, available
     bs = BrowserSettings.from_config(cfg)
@@ -349,7 +408,7 @@ def _cmd_doctor(args) -> int:
     from .skills import SkillLibrary
     lib = SkillLibrary(optional=st.optional_skills, enabled=set(st.enable_skills))
     missing = sorted({b for s in lib.available() for b in s.missing_bins})
-    print(f"ok  skills      {len(lib.available())} available here; {len(lib.hidden_optional)} optional off")
+    print(f"{ok(True)} skills      {len(lib.available())} available here; {len(lib.hidden_optional)} optional off")
     if missing:
         print(f"    some skills want: {', '.join(missing[:20])}")
     from .config import load_channels
@@ -359,7 +418,7 @@ def _cmd_doctor(args) -> int:
             has = bool(s.options.get("token") or s.options.get("webhook_url"))
             print(f"{ok(has and bool(s.owners))} channel     {s.name} — owners {len(s.owners)}, credential {'set' if has else 'MISSING'}")
     else:
-        print("--  channels    none enabled ([channels] enabled = [...])")
+        print(f"{ok(False)} channels    none enabled ([channels] enabled = [...])")
     from .mcp import load_servers
     servers = load_servers(cfg, home)
     print(f"{ok(bool(servers))} mcp         {', '.join(servers) or 'no servers (smooth-agent mcp add …)'}")
@@ -850,34 +909,71 @@ def _cmd_channels(args) -> int:
 
 # ---------- service ----------
 
-def _cmd_service(args) -> int:
-    home = ensure_home()
-    # the module form always runs THIS install, with no PATH ambiguity (e.g. a same-named script elsewhere)
-    exe = f"{sys.executable} -m smooth_agent.cli"
+LAUNCHD_LABEL = "family.smooth.agent"
+
+
+def service_files(home: Path, python: str | None = None) -> dict[str, str]:
+    """The service definitions for this install: a systemd user unit and a launchd plist.
+    Both run `<this python> -m smooth_agent.cli daemon`, so a same-named script elsewhere
+    on PATH can never be started by mistake."""
+    from xml.sax.saxutils import escape
+    py = python or sys.executable
     unit = (
         "[Unit]\n"
-        "Description=Smooth Agent (channels + scheduled jobs)\n"
+        "Description=Smooth Agent (chat channels + scheduled jobs)\n"
         "After=network-online.target\nWants=network-online.target\n\n"
         "[Service]\n"
         "Type=simple\n"
-        f"ExecStart={exe} daemon\n"
+        f"ExecStart={py} -m smooth_agent.cli daemon\n"
         f"Environment=SMOOTH_AGENT_HOME={home}\n"
+        "Environment=PYTHONUNBUFFERED=1\n"
         "Restart=always\nRestartSec=5\n\n"
         "[Install]\nWantedBy=default.target\n"
     )
+    log = home / "daemon.log"
+    args = "".join(f"\n    <string>{escape(a)}</string>" for a in (py, "-m", "smooth_agent.cli", "daemon"))
+    plist = (
+        '<?xml version="1.0" encoding="UTF-8"?>\n'
+        '<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">\n'
+        '<plist version="1.0">\n<dict>\n'
+        f"  <key>Label</key>\n  <string>{LAUNCHD_LABEL}</string>\n"
+        f"  <key>ProgramArguments</key>\n  <array>{args}\n  </array>\n"
+        "  <key>EnvironmentVariables</key>\n  <dict>\n"
+        f"    <key>SMOOTH_AGENT_HOME</key>\n    <string>{escape(str(home))}</string>\n"
+        "    <key>PYTHONUNBUFFERED</key>\n    <string>1</string>\n  </dict>\n"
+        "  <key>RunAtLoad</key>\n  <true/>\n"
+        "  <key>KeepAlive</key>\n  <true/>\n"
+        f"  <key>StandardOutPath</key>\n  <string>{escape(str(log))}</string>\n"
+        f"  <key>StandardErrorPath</key>\n  <string>{escape(str(log))}</string>\n"
+        "</dict>\n</plist>\n"
+    )
+    return {"systemd": unit, "launchd": plist}
+
+
+def _cmd_service(args) -> int:
+    home = ensure_home()
+    files = service_files(home)
+    kind = args.kind or ("launchd" if sys.platform == "darwin" else "systemd")
+    if kind == "launchd":
+        dest = Path.home() / "Library" / "LaunchAgents" / f"{LAUNCHD_LABEL}.plist"
+        enable = (f"  launchctl bootstrap gui/$(id -u) {dest}\n"
+                  f"  launchctl kickstart -k gui/$(id -u)/{LAUNCHD_LABEL}   # restart\n"
+                  f"  tail -f {home / 'daemon.log'}   # logs")
+    else:
+        dest = Path.home() / ".config" / "systemd" / "user" / "smooth-agent.service"
+        enable = ("  systemctl --user daemon-reload\n"
+                  "  systemctl --user enable --now smooth-agent\n"
+                  "  loginctl enable-linger $USER   # keep running after you log out (servers)\n"
+                  "  journalctl --user -u smooth-agent -f   # logs")
     if not args.install:
-        print(unit)
-        print("# install (user service):")
-        print("#   smooth-agent service --install")
-        print("# then: systemctl --user daemon-reload && systemctl --user enable --now smooth-agent")
+        print(files[kind])
+        print(f"# install: smooth-agent service --install{' --kind ' + kind if args.kind else ''}  (writes {dest})")
         return 0
-    dest = Path.home() / ".config" / "systemd" / "user" / "smooth-agent.service"
     dest.parent.mkdir(parents=True, exist_ok=True)
-    dest.write_text(unit, encoding="utf-8")
-    print(f"wrote {dest}")
-    print("enable it with:\n  systemctl --user daemon-reload\n  systemctl --user enable --now smooth-agent\n"
-          "  journalctl --user -u smooth-agent -f   # logs")
+    dest.write_text(files[kind], encoding="utf-8")
+    print(f"wrote {dest}\nstart it with:\n{enable}")
     return 0
+
 
 
 # ---------- parser ----------
@@ -904,6 +1000,8 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--model")
     sp.add_argument("--key", help="API key to store in ~/.smooth-agent/.env")
     sp.add_argument("--force", action="store_true", help="overwrite an existing config")
+    sp.add_argument("--channels", metavar="LIST", help="enable chat channels without asking, e.g. telegram,slack")
+    sp.add_argument("--no-channels", action="store_true", help="skip the chat-channel step")
     sp.set_defaults(func=_cmd_setup)
 
     sp = sub.add_parser("doctor", help="check what works on this machine")
@@ -969,8 +1067,9 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("rest", nargs="*", help='test: <name> [chat_id] "<message>"')
     sp.set_defaults(func=_cmd_channels)
 
-    sp = sub.add_parser("service", help="print (or install) a systemd user service for the daemon")
-    sp.add_argument("--install", action="store_true", help="write the unit to ~/.config/systemd/user/")
+    sp = sub.add_parser("service", help="print or install a background service for the daemon")
+    sp.add_argument("--install", action="store_true", help="write it (systemd user unit / launchd agent)")
+    sp.add_argument("--kind", choices=["systemd", "launchd"], help="default: launchd on macOS, systemd elsewhere")
     sp.set_defaults(func=_cmd_service)
 
     sp = sub.add_parser("skills", help="list / search / install / remove skills")

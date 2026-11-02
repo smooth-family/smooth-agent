@@ -1,0 +1,23 @@
+# Smooth Agent with Docker Compose.
+#
+#   docker compose run --rm smooth-agent setup      # once: provider, key, channels -> ./data
+#   docker compose up -d                            # run channels + scheduled jobs
+#   docker compose logs -f
+#   docker compose run --rm smooth-agent run        # chat in the terminal
+#
+# ./data holds config.toml, .env (your keys), memory, sessions, skills and the workspace.
+# The container fixes ./data's ownership on start and runs the agent as uid 1000, not root.
+services:
+  smooth-agent:
+    build:
+      context: .
+      args:
+        BROWSER: "0"          # "1" adds Chromium for the browser tools (bigger image)
+    image: smooth-agent:latest
+    restart: unless-stopped
+    stdin_open: true          # for `run` / `setup`
+    tty: true
+    volumes:
+      - ./data:/data
+    ports:
+      - "8808:8808"           # inbound webhooks (WhatsApp / Slack / LINE); remove if you only use Telegram/Matrix

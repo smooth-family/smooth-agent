@@ -53,28 +53,30 @@ the config obvious, and every stage runnable by someone who just `git clone`d it
   nothing changed) and the `[SILENT]` reply.
 - `clarify` tool.
 
-## Stage 4 — Channels + installer
+## Stage 4 — Channels + installer (v0.5.0)
 
-Done (v0.5.0):
-
-- Chat channels for one owner, picked during setup: Telegram (full: long-poll,
-  inline-button tool approvals, owner allowlist), WhatsApp (Cloud API send +
-  webhook), WeChat Work (delivery robot). `send_message` tool, owner-only
-  access, cron results delivered to a channel (`deliver = "telegram"`).
+- Seven chat channels for one owner, picked during setup: Telegram (two-way,
+  approval buttons), WhatsApp, Slack, Matrix, LINE (two-way), WeChat Work and
+  Discord (delivery). `send_message` tool, owner-only access, approvals by button
+  or a typed yes/no, cron results delivered to a channel (`--deliver telegram`).
 - One saved session per chat (persists across restarts); a single worker
   serializes turns so the model is never hit by parallel requests.
 - `smooth-agent daemon` runs channels + cron together; `smooth-agent service`
-  writes a systemd user unit; `smooth-agent channels list/test`.
+  installs a systemd user unit (Linux) or launchd agent (macOS).
+- Installer: one-line `install.sh` with the Smooth Agent banner, colours and
+  numbered steps (pipx or a private venv, PATH check, setup wizard); the setup
+  wizard itself is a 4-step flow with the same look.
+- Docker image + compose (runs as an unprivileged user, fixes bind-mount
+  ownership, healthcheck), `pipx install`.
+- README with banner, badges and screenshots rendered from real output
+  (`scripts/term_svg.py`); CI on Python 3.9 – 3.13, installer and Docker build.
 
 Still to do:
 
-- More channels: Discord, Slack, Signal, Matrix, LINE, Feishu/Lark, MS Teams,
-  Google Chat, email, SMS (same `Channel` base).
-- A good-looking installer: one-line install script with a Smooth Agent banner,
-  colours and clear steps.
-- A polished GitHub page: banner, badges, screenshots.
-- launchd plist for macOS.
-- Docker image, `pipx install`, one-command install script.
+- Two-way Discord (bot gateway), Signal, MS Teams, Google Chat, Feishu/Lark,
+  Mattermost, email, SMS — on the same `Channel` base.
+- Approval buttons on Slack / LINE / Matrix (typed yes/no works today).
+- Voice notes and images from chat into the agent.
 
 ## Later
 

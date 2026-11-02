@@ -1,0 +1,30 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="473" height="311" viewBox="0 0 473 311" role="img" aria-label="smooth-agent doctor">
+<rect width="473" height="311" rx="10" fill="#0d1117"/>
+<path d="M0 10a10 10 0 0 1 10-10h453a10 10 0 0 1 10 10v26H0z" fill="#161b22"/>
+<circle cx="20" cy="18" r="6" fill="#ff5f56"/>
+<circle cx="40" cy="18" r="6" fill="#ffbd2e"/>
+<circle cx="60" cy="18" r="6" fill="#27c93f"/>
+<text x="236" y="23" fill="#8b949e" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, 'DejaVu Sans Mono', 'Liberation Mono', monospace" font-size="12" text-anchor="middle">smooth-agent doctor</text>
+<text x="22.00" y="58.00" fill="#c9d1d9" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, 'DejaVu Sans Mono', 'Liberation Mono', monospace" font-size="14" xml:space="preserve">$ smooth-agent doctor</text>
+<text x="22.00" y="78.00" fill="#c9d1d9" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, 'DejaVu Sans Mono', 'Liberation Mono', monospace" font-size="14" xml:space="preserve">smooth-agent 0.5.0 on Python 3.13.5 (linux)</text>
+<text x="22.00" y="98.00" fill="#3fb950" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, 'DejaVu Sans Mono', 'Liberation Mono', monospace" font-size="14" xml:space="preserve">ok </text>
+<text x="47.29" y="98.00" fill="#c9d1d9" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, 'DejaVu Sans Mono', 'Liberation Mono', monospace" font-size="14" xml:space="preserve"> home        ~/.smooth-agent</text>
+<text x="22.00" y="118.00" fill="#3fb950" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, 'DejaVu Sans Mono', 'Liberation Mono', monospace" font-size="14" xml:space="preserve">ok </text>
+<text x="47.29" y="118.00" fill="#c9d1d9" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, 'DejaVu Sans Mono', 'Liberation Mono', monospace" font-size="14" xml:space="preserve"> config      ~/.smooth-agent/config.toml</text>
+<text x="22.00" y="138.00" fill="#3fb950" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, 'DejaVu Sans Mono', 'Liberation Mono', monospace" font-size="14" xml:space="preserve">ok </text>
+<text x="47.29" y="138.00" fill="#c9d1d9" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, 'DejaVu Sans Mono', 'Liberation Mono', monospace" font-size="14" xml:space="preserve"> provider    main (deepseek, deepseek-chat)</text>
+<text x="22.00" y="158.00" fill="#3fb950" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, 'DejaVu Sans Mono', 'Liberation Mono', monospace" font-size="14" xml:space="preserve">ok </text>
+<text x="47.29" y="158.00" fill="#c9d1d9" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, 'DejaVu Sans Mono', 'Liberation Mono', monospace" font-size="14" xml:space="preserve"> web tools   search backend: auto</text>
+<text x="22.00" y="178.00" fill="#c9d1d9" opacity="0.6" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, 'DejaVu Sans Mono', 'Liberation Mono', monospace" font-size="14" xml:space="preserve">-- </text>
+<text x="47.29" y="178.00" fill="#c9d1d9" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, 'DejaVu Sans Mono', 'Liberation Mono', monospace" font-size="14" xml:space="preserve"> terminal    off (confirm=yes)</text>
+<text x="22.00" y="198.00" fill="#c9d1d9" opacity="0.6" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, 'DejaVu Sans Mono', 'Liberation Mono', monospace" font-size="14" xml:space="preserve">-- </text>
+<text x="47.29" y="198.00" fill="#c9d1d9" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, 'DejaVu Sans Mono', 'Liberation Mono', monospace" font-size="14" xml:space="preserve"> browser     off; playwright installed</text>
+<text x="22.00" y="218.00" fill="#3fb950" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, 'DejaVu Sans Mono', 'Liberation Mono', monospace" font-size="14" xml:space="preserve">ok </text>
+<text x="47.29" y="218.00" fill="#c9d1d9" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, 'DejaVu Sans Mono', 'Liberation Mono', monospace" font-size="14" xml:space="preserve"> skills      85 available here; 104 optional off</text>
+<text x="22.00" y="238.00" fill="#3fb950" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, 'DejaVu Sans Mono', 'Liberation Mono', monospace" font-size="14" xml:space="preserve">ok </text>
+<text x="47.29" y="238.00" fill="#c9d1d9" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, 'DejaVu Sans Mono', 'Liberation Mono', monospace" font-size="14" xml:space="preserve"> channel     telegram — owners 1, credential set</text>
+<text x="22.00" y="258.00" fill="#c9d1d9" opacity="0.6" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, 'DejaVu Sans Mono', 'Liberation Mono', monospace" font-size="14" xml:space="preserve">-- </text>
+<text x="47.29" y="258.00" fill="#c9d1d9" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, 'DejaVu Sans Mono', 'Liberation Mono', monospace" font-size="14" xml:space="preserve"> channel     slack — owners 0, credential set</text>
+<text x="22.00" y="278.00" fill="#c9d1d9" opacity="0.6" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, 'DejaVu Sans Mono', 'Liberation Mono', monospace" font-size="14" xml:space="preserve">-- </text>
+<text x="47.29" y="278.00" fill="#c9d1d9" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, 'DejaVu Sans Mono', 'Liberation Mono', monospace" font-size="14" xml:space="preserve"> mcp         no servers (smooth-agent mcp add …)</text>
+</svg>
