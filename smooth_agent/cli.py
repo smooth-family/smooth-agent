@@ -870,6 +870,7 @@ def _start_channels(args, home, log):
                      webhook_host=chcfg.webhook_host, webhook_port=chcfg.webhook_port,
                      workspace_root=rt.workspace.root)
     hub_ref["hub"] = hub
+    _give_voice(hub, rt, log)
     hub.start()
     if not hub.channels:  # every channel failed to start: run schedules only
         hub.stop()
@@ -878,6 +879,30 @@ def _start_channels(args, home, log):
         return None, None
     add_send_message_tool(rt.registry, hub)  # after start, so it lists only the live channels
     return hub, rt
+
+
+def _give_voice(hub, rt, log) -> None:
+    """Speech to text for voice notes ([stt]) and voice replies ([tts]) on the channel hub."""
+    from .voice import VoiceError, ffmpeg_ok, speak, speakable, to_voice_ogg, transcribe
+    vs = rt.voice
+    if vs is None:
+        return
+    if vs.can_listen:
+        hub.listen = lambda path: transcribe(rt.router, path, vs)
+    if vs.can_speak and ffmpeg_ok():
+        def _speak(text: str, folder):
+            import time as _t
+            words = speakable(text)
+            if not words:
+                raise VoiceError("nothing to say")
+            raw, ext = speak(rt.router, words, vs)
+            src = folder / f"reply-{_t.strftime('%Y%m%d-%H%M%S')}{ext}"
+            src.write_bytes(raw)
+            return to_voice_ogg(src, src.with_suffix(".voice.ogg"))
+        hub.speak = _speak
+    elif vs.can_speak:
+        log("voice replies need ffmpeg (to make Telegram voice notes); install ffmpeg")
+    log(f"voice: listening {'on' if hub.listen else 'off ([stt])'}, speaking {'on' if hub.speak else 'off ([tts])'}")
 
 
 # ---------- channels ----------

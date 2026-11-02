@@ -182,6 +182,7 @@ class Channel:
     webhook_path: str | None = None
     supports_buttons = False
     supports_progress = False  # post/edit/delete one live progress message
+    supports_voice = False     # send_voice(chat_id, ogg_path)
 
     def __init__(self, cfg: ChannelConfig, *, log: Callable[[str], None] = print):
         self.cfg = cfg
@@ -294,6 +295,31 @@ class TelegramChannel(Channel):
 
     def delete(self, chat_id: str, message_id: str) -> None:
         self._api("deleteMessage", {"chat_id": chat_id, "message_id": int(message_id)}, timeout=15)
+
+    supports_voice = True
+
+    def send_voice(self, chat_id: str, ogg: Path, caption: str = "") -> None:
+        """Upload an OGG/Opus file as a voice note (multipart; the Bot API takes files up to 50 MB)."""
+        import uuid as _uuid
+        boundary = _uuid.uuid4().hex
+        parts = [("chat_id", str(chat_id))] + ([("caption", caption[:1000])] if caption else [])
+        body = b"".join(f'--{boundary}\r\nContent-Disposition: form-data; name="{k}"\r\n\r\n{v}\r\n'.encode()
+                        for k, v in parts)
+        body += (f'--{boundary}\r\nContent-Disposition: form-data; name="voice"; filename="{ogg.name}"\r\n'
+                 "Content-Type: audio/ogg\r\n\r\n").encode() + ogg.read_bytes() + f"\r\n--{boundary}--\r\n".encode()
+        url = f"{TELEGRAM_API}/bot{self.token}/sendVoice"
+        for attempt in range(3):
+            try:
+                _status, raw = _http("POST", url, headers={"content-type": f"multipart/form-data; boundary={boundary}"},
+                                     data=body, timeout=120)
+                data = json.loads(raw or b"{}")
+                if not data.get("ok"):
+                    raise RuntimeError(f"telegram sendVoice: {data.get('description') or data}")
+                return
+            except (urllib.error.URLError, ConnectionError, TimeoutError, OSError):
+                if attempt == 2:
+                    raise
+                time.sleep(1.0 + attempt)
 
     def typing(self, chat_id: str) -> None:
         try:
@@ -840,6 +866,7 @@ def describe_step(name: str, args: dict[str, Any]) -> str:
         "image_generate": lambda: "draw " + g("prompt"),
         "text_to_speech": lambda: "speak",
         "now": lambda: "date",
+        "transcribe_audio": lambda: "listen " + g("path"),
     }
     if name in verbs:
         line = verbs[name]()
@@ -999,6 +1026,8 @@ class ChannelHub:
                  webhook_host: str = "0.0.0.0", webhook_port: int = 8808, workspace_root: Path | None = None):
         self.channels = {c.name: c for c in channels}
         self.workspace_root = Path(workspace_root) if workspace_root else Path.cwd()  # files sent land in inbox/
+        self.listen: Callable[[Path], str] | None = None  # speech to text, set by the daemon when [stt] is configured
+        self.speak: Callable[[str, Path], Path] | None = None  # text -> OGG voice note path, when [tts] is configured
         self.agent_for = agent_for
         self.log = log
         self.approval_timeout = approval_timeout
@@ -1123,7 +1152,7 @@ class ChannelHub:
         if progress is not None:
             agent.on_event = progress.on_event
         try:
-            text = self._receive_files(channel, inbound) if inbound.attachments else inbound.text
+            text = self._receive_files(channel, inbound, progress) if inbound.attachments else inbound.text
             turn = agent.run(text)
             reply = turn.text or "(no answer)"
             if turn.stopped == "max_steps":
@@ -1142,12 +1171,33 @@ class ChannelHub:
             channel.send(inbound.chat_id, reply)
         except Exception as e:
             self.log(f"{channel.name}: send error: {e}")
+        if self._wants_voice(channel, inbound) and reply and not reply.startswith(("⏹", "Something went wrong")):
+            self._reply_by_voice(channel, inbound.chat_id, reply)
 
-    def _receive_files(self, channel: Channel, inbound: Inbound) -> str:
-        """Download what the owner sent into workspace/inbox/<date>/ and tell the agent what arrived."""
+    VOICE_KINDS = ("voice", "audio", "video_note")
+
+    def _wants_voice(self, channel: Channel, inbound: Inbound) -> bool:
+        mode = str(channel.cfg.options.get("voice_replies", "off")).lower()
+        if not (self.speak and channel.supports_voice) or mode in ("off", "false", "no", "never"):
+            return False
+        spoke = any(a.get("kind") in self.VOICE_KINDS for a in inbound.attachments)
+        return mode == "always" or (mode in ("auto", "true", "yes") and spoke)
+
+    def _reply_by_voice(self, channel: Channel, chat_id: str, reply: str) -> None:
+        try:
+            folder = self.workspace_root / "audio" / "replies"
+            folder.mkdir(parents=True, exist_ok=True)
+            ogg = self.speak(reply, folder)
+            channel.send_voice(chat_id, ogg)
+        except Exception as e:  # the text answer is already there: a failed voice copy is only logged
+            self.log(f"{channel.name}: voice reply failed: {e}")
+
+    def _receive_files(self, channel: Channel, inbound: Inbound, progress: "Progress | None" = None) -> str:
+        """Download what the owner sent into workspace/inbox/<date>/ and tell the agent what arrived.
+        Voice notes are transcribed right away; a voice note on its own becomes the request."""
         from .documents import kind_of
         folder = self.workspace_root / "inbox" / time.strftime("%Y-%m-%d")
-        lines = []
+        lines, spoken = [], []
         for att in inbound.attachments:
             try:
                 path = channel.download(att, folder)
@@ -1160,8 +1210,15 @@ class ChannelHub:
             human = f"{size / 1e6:.1f} MB" if size >= 1e6 else f"{max(1, size // 1024)} KB"
             kind = kind_of(path)
             if att.get("kind") in ("voice", "audio", "video", "video_note", "animation"):
-                how = f"{att['kind']} file" + (f", {att['duration']} s" if att.get("duration") else "") + \
-                      " — listening/watching is not available yet; say so if it matters"
+                secs = f", {att['duration']} s" if att.get("duration") else ""
+                heard = self._transcribe(path, rel, progress) if att.get("kind") in ("voice", "audio", "video_note", "video") else None
+                if heard:
+                    spoken.append(heard)
+                    how = f"{att['kind']}{secs} — transcript: «{heard}»"
+                elif heard == "":
+                    how = f"{att['kind']}{secs} — no speech in it"
+                else:
+                    how = f"{att['kind']}{secs} — could not be transcribed" + ("" if self.listen else " (speech to text is not set up: [stt] in the config)")
             elif kind == "image":
                 how = "image — look at it with vision_analyze"
             elif kind == "archive":
@@ -1171,9 +1228,28 @@ class ChannelHub:
             else:
                 how = "read it with read_file"
             lines.append(f"- {rel} ({human}): {how}")
+        if not inbound.text.strip() and len(inbound.attachments) == 1 and len(spoken) == 1:
+            # a voice note on its own: what was said is the message (answer it like a typed one)
+            return f"{spoken[0]}\n\n[the owner said this in a voice note ({lines[0][2:]}); reply in the same language]"
         ask = inbound.text.strip() or ("(The owner sent this without a message: look at it and tell them briefly "
                                        "what it is and what is in it.)")
         return f"{ask}\n\n[files the owner sent, saved in your workspace]\n" + "\n".join(lines)
+
+    def _transcribe(self, path: Path, rel: str, progress: "Progress | None") -> str | None:
+        """Text of a voice note; '' when it holds no speech; None when it could not be done."""
+        if not self.listen:
+            return None
+        if progress is not None:
+            progress.on_event("tool", {"name": "transcribe_audio", "arguments": {"path": path.name}})
+        try:
+            text = self.listen(path)
+            ok = True
+        except Exception as e:
+            self.log(f"transcription failed: {e}")
+            text, ok = None, False
+        if progress is not None:
+            progress.on_event("tool_result", {"name": "transcribe_audio", "result": "ok" if ok else "error"})
+        return text
 
     def _run(self) -> None:
         while not self._stop:

@@ -177,6 +177,11 @@ protected archive). Old binary `.doc`/`.xls` need LibreOffice; RAR and 7z need
 `unrar`, `unar` or 7-Zip on the machine (the Docker image has them) —
 `smooth-agent doctor` shows what this machine can read.
 
+**Talk to it.** Voice notes are transcribed and answered like typed messages
+(`[stt]`: OpenAI, Groq, a local whisper server or a gateway); with
+`voice_replies = "auto"` a voice note gets the answer as text *and* as a voice note
+(`[tts]`, ffmpeg). Code and links are left out of the spoken version.
+
 ## Persona files
 
 `~/.smooth-agent/workspace/` holds six Markdown files that are part of the
@@ -257,7 +262,7 @@ smooth-agent cron list | run <name> | pause <name> | remove <name>
 
 ```bash
 python -m venv .venv && .venv/bin/pip install -e ".[dev]"
-.venv/bin/python -m unittest discover -s tests   # 146 tests, Python 3.9 – 3.13
+.venv/bin/python -m unittest discover -s tests   # 157 tests, Python 3.9 – 3.13
 .venv/bin/python scripts/term_svg.py             # regenerate the README images from real output
 ```
 

@@ -32,6 +32,7 @@ class Runtime:
     store: Any = None
     memory: Any = None
     processes: Any = None
+    voice: Any = None  # VoiceSettings: speech to text / text to speech
     warnings: list[str] = field(default_factory=list)
     _closers: list[Callable[[], None]] = field(default_factory=list)
 
@@ -90,6 +91,10 @@ def build_runtime(config_path: str | None = None, *, approver: Approver | None =
     ms = MediaSettings.from_config(cfg)
     add_media_tools(reg, router, ws, ms)
 
+    from .voice import VoiceSettings, add_voice_tools
+    vs = VoiceSettings.from_config(cfg)
+    add_voice_tools(reg, router, ws, vs)
+
     from .browser import BrowserSession, BrowserSettings, add_browser_tools, available
     bs = BrowserSettings.from_config(cfg)
     if bs.enabled:
@@ -142,7 +147,7 @@ def build_runtime(config_path: str | None = None, *, approver: Approver | None =
     if st.memory:
         rt_ref["agent"] = agent
     return Runtime(agent=agent, router=router, registry=reg, workspace=ws, settings=st, config=cfg, home=home,
-                   store=store, memory=mem, processes=pm, warnings=warnings, _closers=closers)
+                   store=store, memory=mem, processes=pm, voice=vs, warnings=warnings, _closers=closers)
 
 
 def build_chat_agent(rt: Runtime, session_id: str, channel: str = "cli", chat_id: str = "") -> Agent:

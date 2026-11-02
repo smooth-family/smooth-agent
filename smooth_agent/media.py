@@ -175,7 +175,7 @@ def add_media_tools(reg: Registry, router: Router, workspace: Workspace, ms: Med
     if ms.tts_provider or ms.tts_model:
         @reg.tool(
             "text_to_speech",
-            "Turn text into speech and save it as an MP3 in the workspace (audio/). Returns the file path.",
+            "Turn text into speech and save it as an audio file in the workspace (audio/). Returns the file path.",
             {"type": "object", "properties": {
                 "text": {"type": "string"}, "voice": {"type": "string"},
                 "filename": {"type": "string", "description": "optional base name, without extension"},
@@ -197,7 +197,8 @@ def add_media_tools(reg: Registry, router: Router, workspace: Workspace, ms: Med
             out_dir = workspace.resolve("audio")
             out_dir.mkdir(exist_ok=True)
             base = "".join(c for c in str(args.get("filename") or "") if c.isalnum() or c in "-_") or time.strftime("%Y%m%d-%H%M%S")
-            p = out_dir / f"{base}.mp3"
+            from .voice import audio_ext
+            p = out_dir / f"{base}{audio_ext(raw, ctype)}"  # some services return WAV whatever was asked
             p.write_bytes(raw)
             return f"saved {workspace.show(p)} ({len(raw) // 1024} KB)"
 

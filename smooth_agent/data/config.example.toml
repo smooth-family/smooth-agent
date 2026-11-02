@@ -55,7 +55,12 @@ headless = true
 # provider = "openai"
 # model = "gpt-image-1"
 
-# [tts]                # text to speech (OpenAI-compatible /audio/speech)
+# [stt]                # speech to text: voice notes from chat, transcribe_audio (OpenAI-compatible /audio/transcriptions)
+# provider = "openai"  # or groq (whisper-large-v3), a local whisper server, a gateway such as 9router
+# model = "whisper-1"  # default: the provider's model
+# language = "id"      # optional hint
+
+# [tts]                # text to speech: text_to_speech, voice replies (OpenAI-compatible /audio/speech)
 # provider = "openai"
 # model = "gpt-4o-mini-tts"
 # voice = "alloy"
@@ -71,6 +76,7 @@ webhook_port = 8808    # inbound webhook server (WhatsApp); expose it with a rev
 # token_env = "TELEGRAM_BOT_TOKEN"   # bot token from @BotFather, kept in .env
 # owners = ["123456789"]             # your numeric Telegram id
 # auto_approve = false               # approve the owner's tool calls without a button tap
+# voice_replies = "auto"            # off | auto (voice note in -> voice note back) | always; needs [tts] + ffmpeg
 
 # [channels.whatsapp]                # Meta WhatsApp Cloud API; point the webhook at <host>/webhook/whatsapp
 # token_env = "WHATSAPP_TOKEN"

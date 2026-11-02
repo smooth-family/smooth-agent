@@ -169,7 +169,7 @@ class HubFileTests(unittest.TestCase):
         self.assertIn(f"inbox/{today}/invoice.pdf", text)
         self.assertIn("read_file converts it", text)
         self.assertIn("extract_archive", text)
-        self.assertIn("voice file, 3 s", text)
+        self.assertIn("voice, 3 s — could not be transcribed (speech to text is not set up", text)
         self.assertIn("lost.docx: could not be downloaded (network down)", text)
         self.assertTrue((ws / "inbox" / today / "invoice.pdf").exists())
 
