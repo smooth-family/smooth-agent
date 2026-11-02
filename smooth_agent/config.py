@@ -74,7 +74,7 @@ class Settings:
 
     workspace: str = ""            # default: ./workspace
     max_steps: int = 12
-    max_tokens: int = 1536
+    max_tokens: int = 4096         # reasoning models spend part of this thinking
     instructions: str = ""         # extra system instructions from the owner
     timezone: str = ""             # e.g. "Asia/Jakarta"; default: the machine's
     context_tokens: int = 64000    # compress older messages beyond ~80% of this
@@ -82,6 +82,7 @@ class Settings:
     memory: bool = True            # long-term memory + saved sessions
     http: bool = True              # http_get, web_extract, web_search
     search: str = "auto"           # auto | duckduckgo | brave | tavily | searxng
+    files: str = "workspace"       # "workspace" or "full" (file tools reach the whole machine; writes outside ask)
     terminal: bool = False         # run shell commands on this machine
     code: bool | None = None       # execute_code (defaults to the terminal setting)
     confirm: bool = True           # ask before each terminal / execute_code call
@@ -98,11 +99,11 @@ class Settings:
         a, t = cfg.get("agent") or {}, cfg.get("tools") or {}
         return cls(
             workspace=str(a.get("workspace", "")), max_steps=int(a.get("max_steps", 12)),
-            max_tokens=int(a.get("max_tokens", 1536)), instructions=str(a.get("instructions", "")),
+            max_tokens=int(a.get("max_tokens", 4096)), instructions=str(a.get("instructions", "")),
             timezone=str(a.get("timezone", "")), context_tokens=int(a.get("context_tokens", 64000)),
             keep_recent=int(a.get("keep_recent", 10)), memory=bool(a.get("memory", True)),
             http=bool(t.get("http", True)), search=str(t.get("search", "auto")),
-            terminal=bool(t.get("terminal", False)), code=(None if t.get("code") is None else bool(t["code"])),
+            files=str(t.get("files", "workspace")), terminal=bool(t.get("terminal", False)), code=(None if t.get("code") is None else bool(t["code"])),
             confirm=bool(t.get("confirm", True)), timeout=int(t.get("timeout", 180)),
             delegate=bool(t.get("delegate", True)), delegate_steps=int(t.get("delegate_steps", 10)),
             skills=bool(t.get("skills", True)), optional_skills=bool(t.get("optional_skills", False)),

@@ -169,7 +169,7 @@ def add_media_tools(reg: Registry, router: Router, workspace: Workspace, ms: Med
                 ext = {"image/jpeg": "jpg", "image/webp": "webp", "image/gif": "gif"}.get(image_mime(data) or "", "png")
                 p = out_dir / (f"{base}.{ext}" if len(items) == 1 else f"{base}-{i}.{ext}")
                 p.write_bytes(data)
-                saved.append(str(p.relative_to(workspace.root)))
+                saved.append(str(workspace.show(p)))
             return "saved " + ", ".join(saved) if saved else "error: no image data in the response"
 
     if ms.tts_provider or ms.tts_model:
@@ -199,7 +199,7 @@ def add_media_tools(reg: Registry, router: Router, workspace: Workspace, ms: Med
             base = "".join(c for c in str(args.get("filename") or "") if c.isalnum() or c in "-_") or time.strftime("%Y%m%d-%H%M%S")
             p = out_dir / f"{base}.mp3"
             p.write_bytes(raw)
-            return f"saved {p.relative_to(workspace.root)} ({len(raw) // 1024} KB)"
+            return f"saved {workspace.show(p)} ({len(raw) // 1024} KB)"
 
 
 __all__ = ["MediaSettings", "add_media_tools", "describe", "load_image", "image_mime", "data_url"]

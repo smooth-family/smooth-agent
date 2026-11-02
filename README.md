@@ -112,7 +112,7 @@ Everything lives in `~/.smooth-agent/` (override with `SMOOTH_AGENT_HOME`):
   research, finance, productivity, smart home and more. The agent reads a skill
   when a task matches it, and writes or improves its own skills as it learns
   your work.
-- **Safe by default.** File tools are confined to one workspace folder; shell and
+- **Safe by default.** File tools are confined to one workspace folder (or the whole machine, with approvals, if you choose); shell and
   code run only when you switch them on, ask before each command, and never see
   your API keys; keys are redacted from everything printed.
 - **Yours to modify.** MIT licensed. The core uses only the Python standard library.
@@ -158,6 +158,29 @@ auto_approve = false       # true = run your tool calls without the button tap
   Matrix need no open port.
 
 Test a channel without the daemon: `smooth-agent channels test telegram "hello"`.
+
+**In the chat:** `/new` starts a fresh conversation (the old one stays saved and
+searchable), `/status` shows the model, session and memory, `/model` switches
+the model for that chat, `/stop` ends what the agent is doing, `/help`. While it
+works you see one live message with its steps, shell-style — `$ git pull`,
+`read app.py`, `write app.py`, `search …`, `open https://…` — which disappears
+when the answer arrives.
+
+## Persona files
+
+`~/.smooth-agent/workspace/` holds six Markdown files that are part of the
+agent's instructions on every message: `SOUL.md` (character and tone),
+`IDENTITY.md`, `USER.md` (about you), `AGENTS.md` (how it works),
+`TOOLS.md` and `MEMORY.md`. They start empty and cost nothing until you — or the
+agent, when you ask it — write in them.
+
+## File access
+
+By default the file tools stay inside the workspace. `[tools] files = "full"`
+lets them reach the whole machine (Linux, macOS, Windows): reading anywhere is
+free, while writing outside the workspace and reading files that hold secrets
+(`.env`, `~/.ssh`, `*.pem`, …) ask you first — on Telegram as ✅ / ❌ buttons.
+`[tools] terminal = true` adds shell commands, each one approved the same way.
 
 ## Keep it running
 
@@ -222,7 +245,7 @@ smooth-agent cron list | run <name> | pause <name> | remove <name>
 
 ```bash
 python -m venv .venv && .venv/bin/pip install -e ".[dev]"
-.venv/bin/python -m unittest discover -s tests   # 92 tests, Python 3.9 – 3.13
+.venv/bin/python -m unittest discover -s tests   # 116 tests, Python 3.9 – 3.13
 .venv/bin/python scripts/term_svg.py             # regenerate the README images from real output
 ```
 

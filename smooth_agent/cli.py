@@ -436,7 +436,7 @@ def _skill_lib(args, include_optional: bool = False):
         st = Settings.from_config(load_config(args.config))
     except FileNotFoundError:
         st = Settings()
-    return SkillLibrary(workspace=Path(st.workspace).expanduser() if st.workspace else Path.cwd() / "workspace",
+    return SkillLibrary(workspace=Path(st.workspace).expanduser() if st.workspace else agent_home() / "workspace",
                         extra_dirs=[Path(d) for d in st.skill_dirs], optional=st.optional_skills or include_optional,
                         enabled=set(st.enable_skills))
 
@@ -990,7 +990,7 @@ def _cmd_service(args) -> int:
 
 def _add_agent_args(sp) -> None:
     sp.add_argument("-p", "--provider", help="provider name (default from config)")
-    sp.add_argument("-w", "--workspace", help="workspace directory the agent can read/write (default ./workspace)")
+    sp.add_argument("-w", "--workspace", help="workspace directory the agent works in (default ~/.smooth-agent/workspace)")
     sp.add_argument("--max-steps", type=int, default=0, help="max tool-call rounds per message (default from config)")
     sp.add_argument("--no-http", action="store_true", help="disable web tools")
     sp.add_argument("--terminal", action="store_true", help="enable terminal + execute_code for this run")

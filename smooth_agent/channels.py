@@ -84,6 +84,39 @@ def chunk(text: str, limit: int = MAX_LEN) -> list[str]:
     return out
 
 
+def balance_fences(parts: list[str]) -> list[str]:
+    """Close a ``` code block that a chunk boundary cut in half, and reopen it in the next chunk."""
+    out, carry = [], ""
+    for part in parts:
+        part = carry + part
+        carry = ""
+        if part.count("```") % 2:
+            part += "\n```"
+            carry = "```\n"
+        out.append(part)
+    return out
+
+
+def md_to_html(text: str) -> str:
+    """The Markdown chat models write -> Telegram HTML: code blocks, `code`, **bold**, [links](url), # headings."""
+    import html
+    import re
+    out = []
+    for i, seg in enumerate(re.split(r"```", text)):
+        if i % 2:  # inside a fence: drop a language tag line, keep the code verbatim
+            lang, nl, body = seg.partition("\n")
+            code = body if nl and re.fullmatch(r"[\w+#.-]*", lang.strip()) else seg
+            out.append(f"<pre>{html.escape(code.strip(chr(10)))}</pre>")
+            continue
+        seg = html.escape(seg, quote=False)
+        seg = re.sub(r"`([^`\n]+)`", r"<code>\1</code>", seg)
+        seg = re.sub(r"\*\*(?=\S)(.+?)(?<=\S)\*\*", r"<b>\1</b>", seg)
+        seg = re.sub(r"\[([^\]\n]+)\]\((https?://[^)\s]+)\)", r'<a href="\2">\1</a>', seg)
+        seg = re.sub(r"(?m)^#{1,6}\s+(.+)$", r"<b>\1</b>", seg)
+        out.append(seg)
+    return "".join(out)
+
+
 @dataclass
 class Inbound:
     channel: str
@@ -109,6 +142,7 @@ class Channel:
     kind = "base"
     webhook_path: str | None = None
     supports_buttons = False
+    supports_progress = False  # post/edit/delete one live progress message
 
     def __init__(self, cfg: ChannelConfig, *, log: Callable[[str], None] = print):
         self.cfg = cfg
@@ -164,15 +198,44 @@ class TelegramChannel(Channel):
         _status, data = _post_json(url, payload, timeout=timeout)
         return data
 
+    supports_progress = True
+    COMMANDS = [("new", "start a fresh conversation"), ("status", "model, session, memory"),
+                ("model", "show or switch the model"), ("stop", "stop what I'm doing"), ("help", "what I can do")]
+
     def send(self, chat_id: str, text: str, *, buttons: list[tuple[str, str]] | None = None) -> None:
-        parts = chunk(text)
+        parts = balance_fences(chunk(text))
         for i, part in enumerate(parts):
-            payload: dict[str, Any] = {"chat_id": chat_id, "text": part, "disable_web_page_preview": True}
+            payload: dict[str, Any] = {"chat_id": chat_id, "text": md_to_html(part), "parse_mode": "HTML",
+                                       "disable_web_page_preview": True}
             if buttons and i == len(parts) - 1:
                 payload["reply_markup"] = {"inline_keyboard": [[{"text": t, "callback_data": d} for t, d in buttons]]}
             data = self._api("sendMessage", payload)
+            if not data.get("ok") and "parse" in str(data.get("description", "")).lower():
+                payload.pop("parse_mode")  # markup Telegram would not accept: send it as plain text
+                payload["text"] = part
+                data = self._api("sendMessage", payload)
             if not data.get("ok"):  # e.g. 403 "bot can't initiate conversation": the owner never pressed Start
                 raise RuntimeError(f"telegram sendMessage: {data.get('description') or data}")
+
+    # --- one live progress message: post it, edit it, delete it ---
+    @staticmethod
+    def _progress_html(text: str) -> str:
+        """First line bold, the steps as a monospace shell block."""
+        import html
+        head, _, body = text[:MAX_LEN].partition("\n")
+        return f"<b>{html.escape(head)}</b>" + (f"\n<pre>{html.escape(body)}</pre>" if body else "")
+
+    def post(self, chat_id: str, text: str) -> str | None:
+        data = self._api("sendMessage", {"chat_id": chat_id, "text": self._progress_html(text), "parse_mode": "HTML",
+                                         "disable_notification": True, "disable_web_page_preview": True}, timeout=15)
+        return str(data["result"]["message_id"]) if data.get("ok") else None
+
+    def edit(self, chat_id: str, message_id: str, text: str) -> None:
+        self._api("editMessageText", {"chat_id": chat_id, "message_id": int(message_id), "parse_mode": "HTML",
+                                      "text": self._progress_html(text), "disable_web_page_preview": True}, timeout=15)
+
+    def delete(self, chat_id: str, message_id: str) -> None:
+        self._api("deleteMessage", {"chat_id": chat_id, "message_id": int(message_id)}, timeout=15)
 
     def typing(self, chat_id: str) -> None:
         try:
@@ -184,6 +247,11 @@ class TelegramChannel(Channel):
         super().start(hub)
         if not self.token:
             raise RuntimeError("telegram: no bot token (set the token env in [channels.telegram])")
+        try:  # the "/" menu in the chat
+            self._api("setMyCommands", {"commands": [{"command": c, "description": d} for c, d in self.COMMANDS]},
+                      timeout=15)
+        except Exception as e:
+            self.log(f"telegram: could not set the command menu: {e}")
         self._thread = threading.Thread(target=self._poll, name="telegram-poll", daemon=True)
         self._thread.start()
         self.log(f"telegram: polling as bot (owners: {', '.join(self.cfg.owners) or 'NONE — set [channels.telegram] owners'})")
@@ -629,6 +697,146 @@ YES = {"y", "yes", "ya", "iya", "ok", "oke", "okay", "boleh", "allow", "lanjut",
 NO = {"n", "no", "tidak", "nggak", "ngga", "gak", "ga", "jangan", "deny", "stop", "batal", "❌"}
 
 
+def describe_step(name: str, args: dict[str, Any]) -> str:
+    """A tool call as a shell-style line: `$ git pull`, `read app.py`, `write app.py`, `open https://…`."""
+    a = args if isinstance(args, dict) else {}
+
+    def g(*keys: str) -> str:
+        for k in keys:
+            v = a.get(k)
+            if v:
+                return ", ".join(map(str, v)) if isinstance(v, list) else str(v)
+        return ""
+
+    verbs: dict[str, Callable[[], str]] = {
+        "terminal": lambda: "$ " + g("command"),
+        "execute_code": lambda: "python " + (g("code").strip().splitlines() or [""])[0],
+        "process": lambda: f"process {g('action')} {g('session_id')}",
+        "read_file": lambda: "read " + g("path"),
+        "write_file": lambda: "write " + g("path"),
+        "patch": lambda: "edit " + (g("path") or "(diff)"),
+        "list_dir": lambda: "ls " + (g("path") or "."),
+        "search_files": lambda: f"grep {g('pattern')}" + (f" {g('path')}" if g("path") else ""),
+        "web_search": lambda: "search " + g("query"),
+        "web_extract": lambda: "open " + g("urls", "url"),
+        "http_get": lambda: "fetch " + g("url"),
+        "browser_navigate": lambda: "open " + g("url"),
+        "browser_click": lambda: "click " + g("ref"),
+        "browser_type": lambda: "type " + g("text"),
+        "memory": lambda: f"memory {g('action')}",
+        "session_search": lambda: "recall " + g("query"),
+        "skill_view": lambda: "skill " + g("name"),
+        "skills_list": lambda: "skills",
+        "skill_manage": lambda: f"skill {g('action')} {g('name')}",
+        "delegate_task": lambda: "delegate " + (g("goal") or f"{len(a.get('tasks') or [])} tasks"),
+        "cronjob": lambda: f"cron {g('action')} {g('name', 'job_id')}",
+        "send_message": lambda: "message",
+        "todo": lambda: "todo",
+        "clarify": lambda: "ask " + g("question"),
+        "vision_analyze": lambda: "look " + g("image_url", "path"),
+        "image_generate": lambda: "draw " + g("prompt"),
+        "text_to_speech": lambda: "speak",
+        "now": lambda: "date",
+    }
+    if name in verbs:
+        line = verbs[name]()
+    elif name.startswith("browser_"):
+        line = f"browser {name[8:]} {g('ref', 'key', 'direction')}"
+    elif name.startswith("mcp_"):
+        line = "mcp " + name[4:]
+    else:
+        line = f"{name} {g('path', 'query', 'url', 'name', 'action')}"
+    line = " ".join(line.split())
+    return line if len(line) <= 80 else line[:79] + "…"
+
+
+class Progress:
+    """The live progress message of one turn: created on the first tool step, edited as steps
+    happen (throttled, Telegram allows about one edit a second), deleted when the answer is
+    sent. Also keeps the 'typing…' indicator alive on long turns."""
+
+    SHOW = 8          # last N steps on screen
+    EDIT_EVERY = 1.5  # seconds between edits
+    TYPING_EVERY = 4.5
+
+    def __init__(self, channel: "Channel", chat_id: str, *, log: Callable[[str], None] = print):
+        self.channel, self.chat_id, self.log = channel, chat_id, log
+        self.lines: list[str] = []
+        self.msg_id: str | None = None
+        self._dirty = False
+        self._last_edit = 0.0
+        self._t0 = time.time()
+        self._lock = threading.Lock()
+        self._done = threading.Event()
+        self._thread = threading.Thread(target=self._tick, name="progress", daemon=True)
+        self._thread.start()
+
+    def on_event(self, event: str, data: dict[str, Any]) -> None:
+        with self._lock:
+            if event == "tool":
+                self.lines.append(describe_step(data.get("name", ""), data.get("arguments") or {}))
+            elif event == "sub:tool":
+                self.lines.append("  ↳ " + describe_step(data.get("name", ""), data.get("arguments") or {}))
+            elif event in ("tool_result", "sub:tool_result"):
+                res = str(data.get("result", ""))
+                if self.lines and res.startswith(("error", "denied", "cancelled")):
+                    self.lines[-1] += "  ✗"
+            elif event == "compressed":
+                self.lines.append("🗜 summarising the earlier conversation")
+            else:
+                return
+            self._dirty = True
+
+    def _render(self) -> str:
+        n = len(self.lines)
+        shown = self.lines[-self.SHOW:]
+        head = f"⏳ working… {int(time.time() - self._t0)}s"  # Telegram shows the lines as a shell block
+        more = [f"… {n - len(shown)} earlier steps"] if n > len(shown) else []
+        return "\n".join([head, *more, *shown])
+
+    def _tick(self) -> None:
+        last_typing = 0.0
+        while not self._done.wait(0.5):
+            now = time.time()
+            try:
+                if now - last_typing >= self.TYPING_EVERY and hasattr(self.channel, "typing"):
+                    self.channel.typing(self.chat_id)
+                    last_typing = now
+                with self._lock:
+                    due = self._dirty and now - self._last_edit >= self.EDIT_EVERY
+                    text = self._render() if due else ""
+                    if due:
+                        self._dirty = False
+                        self._last_edit = now
+                if due:
+                    if self.msg_id is None:
+                        self.msg_id = self.channel.post(self.chat_id, text)
+                    else:
+                        self.channel.edit(self.chat_id, self.msg_id, text)
+            except Exception as e:  # progress is cosmetic: never break the turn
+                self.log(f"{self.channel.name}: progress update failed: {e}")
+
+    def finish(self) -> None:
+        self._done.set()
+        self._thread.join(timeout=5)
+        if self.msg_id is not None:
+            try:
+                self.channel.delete(self.chat_id, self.msg_id)
+            except Exception as e:
+                self.log(f"{self.channel.name}: could not remove the progress message: {e}")
+
+
+HELP = (
+    "I'm your Smooth Agent. Just talk to me — I can search and read the web, work with files in my workspace, "
+    "remember things about you, run scheduled jobs and (if you turn it on) run commands on this machine.\n\n"
+    "/new — start a fresh conversation (the old one is kept)\n"
+    "/status — model, session, memory\n"
+    "/model — show or switch the model, e.g. /model jerouter\n"
+    "/stop — stop what I'm doing\n"
+    "/help — this message"
+)
+
+
 class ChannelHub:
     """Runs the channels and routes their messages to per-chat agent sessions.
 
@@ -654,6 +862,9 @@ class ChannelHub:
         self._worker: threading.Thread | None = None
         self._webhook: WebhookServer | None = None
         self._stop = False
+        self._turn = threading.Lock()         # held by the worker for a whole turn
+        self._agents_lock = threading.Lock()  # get-or-create of per-chat agents
+        self._started = time.time()
 
     # --- intake ---
     def dispatch(self, channel: Channel, inbound: Inbound) -> None:
@@ -666,6 +877,8 @@ class ChannelHub:
                              f"owners list:\n{inbound.chat_id}")
             except Exception:
                 pass
+            return
+        if inbound.text.startswith("/") and self._command(channel, inbound):
             return
         # a typed answer to an approval prompt: resolve it here, because the worker is blocked waiting for it
         key = self._awaiting.get((channel.name, inbound.chat_id))
@@ -746,25 +959,38 @@ class ChannelHub:
         return deliver
 
     # --- the worker ---
+    def _agent(self, channel: Channel, chat_id: str) -> Any:
+        session_id = f"{channel.name}-{chat_id}"
+        with self._agents_lock:
+            agent = self._agents.get(session_id)
+            if agent is None:
+                agent = self._agents[session_id] = self.agent_for(session_id, channel.name, chat_id)
+            return agent
+
     def _handle(self, channel: Channel, inbound: Inbound) -> None:
-        session_id = f"{channel.name}-{inbound.chat_id}"
-        agent = self._agents.get(session_id)
-        if agent is None:
-            agent = self._agents[session_id] = self.agent_for(session_id, channel.name, inbound.chat_id)
+        agent = self._agent(channel, inbound.chat_id)
         self._active = (channel, inbound.chat_id)
-        typing = getattr(channel, "typing", None)
-        if typing:
-            typing(inbound.chat_id)
+        progress = Progress(channel, inbound.chat_id, log=self.log) if channel.supports_progress else None
+        if progress is None and hasattr(channel, "typing"):
+            channel.typing(inbound.chat_id)
+        prev_events = getattr(agent, "on_event", None)
+        if progress is not None:
+            agent.on_event = progress.on_event
         try:
             turn = agent.run(inbound.text)
             reply = turn.text or "(no answer)"
             if turn.stopped == "max_steps":
                 reply += "\n\n(stopped at the step limit)"
+            elif turn.stopped == "cancelled":
+                reply = "⏹ Stopped."
         except Exception as e:
             self.log(f"{channel.name}: run error: {e}")
             reply = f"Something went wrong handling that: {e}"
         finally:
             self._active = None
+            if progress is not None:
+                agent.on_event = prev_events
+                progress.finish()
         try:
             channel.send(inbound.chat_id, reply)
         except Exception as e:
@@ -777,7 +1003,125 @@ class ChannelHub:
                 return
             channel, inbound = item
             self.log(f"{channel.name}: {inbound.name or inbound.chat_id}: {inbound.text[:80]}")
-            self._handle(channel, inbound)
+            with self._turn:
+                self._handle(channel, inbound)
+
+    # --- commands (run on the receiving thread, so /stop and /status work while a turn is running) ---
+    def _command(self, channel: Channel, inbound: Inbound) -> bool:
+        """Handle a /command. Returns False for unknown ones, which then go to the agent as text."""
+        word, _, arg = inbound.text.strip().partition(" ")
+        cmd = word[1:].split("@", 1)[0].lower()  # /status@mybot in groups
+        handler = {"start": self._cmd_help, "help": self._cmd_help, "status": self._cmd_status,
+                   "stop": self._cmd_stop, "new": self._cmd_new, "reset": self._cmd_new,
+                   "model": self._cmd_model}.get(cmd)
+        if handler is None:
+            return False
+        try:
+            reply = handler(channel, inbound.chat_id, arg.strip())
+        except Exception as e:
+            self.log(f"{channel.name}: /{cmd} failed: {e}")
+            reply = f"/{cmd} failed: {e}"
+        if reply:
+            try:
+                channel.send(inbound.chat_id, reply)
+            except Exception as e:
+                self.log(f"{channel.name}: send error: {e}")
+        return True
+
+    def _busy_with(self, channel: Channel, chat_id: str) -> bool:
+        a = self._active
+        return bool(a and a[0].name == channel.name and a[1] == chat_id)
+
+    def _cmd_help(self, channel: Channel, chat_id: str, arg: str) -> str:
+        return HELP
+
+    def _cmd_status(self, channel: Channel, chat_id: str, arg: str) -> str:
+        from . import __version__
+        agent = self._agent(channel, chat_id)
+        up = int(time.time() - self._started)
+        uptime = f"{up // 86400}d {up % 86400 // 3600}h" if up >= 86400 else f"{up // 3600}h {up % 3600 // 60}m"
+        router = agent.router
+        name = agent.provider or router.default
+        prov = router.providers.get(name)
+        lines = [f"🟢 Smooth Agent {__version__} · up {uptime}",
+                 f"model: {name} → {prov.model if prov else '?'}" + (" (set with /model)" if agent.provider else "")]
+        if router.fallbacks:
+            lines.append("fallback: " + ", ".join(f"{f} → {router.providers[f].model}" for f in router.fallbacks))
+        if agent.last_provider:
+            lines.append(f"last answer: {agent.last_provider}")
+        n = len([m for m in agent.history if m.get("role") in ("user", "assistant")])
+        lines.append(f"session: {agent.session_id} · {n} messages")
+        if agent.memory is not None:
+            try:
+                lines.append(f"memory: {agent.memory.count()} notes")
+            except Exception:
+                pass
+        state = "working on a message" if self._busy_with(channel, chat_id) else "idle"
+        waiting = self._q.qsize()
+        lines.append(f"now: {state}" + (f", {waiting} waiting" if waiting else ""))
+        return "\n".join(lines)
+
+    def _cmd_stop(self, channel: Channel, chat_id: str, arg: str) -> str:
+        dropped = self._drop_queued(channel, chat_id)
+        key = self._awaiting.get((channel.name, chat_id))
+        if key:
+            self.resolve_approval(key, False)
+        if self._busy_with(channel, chat_id):
+            self._agent(channel, chat_id).cancel.set()
+            return ""  # the turn ends with "⏹ Stopped." itself
+        return "Nothing running." + (f" Dropped {dropped} waiting message(s)." if dropped else "")
+
+    def _drop_queued(self, channel: Channel, chat_id: str) -> int:
+        kept, dropped = [], 0
+        while True:
+            try:
+                item = self._q.get_nowait()
+            except queue.Empty:
+                break
+            if item is not None and item[0].name == channel.name and item[1].chat_id == chat_id:
+                dropped += 1
+            else:
+                kept.append(item)
+        for item in kept:
+            self._q.put(item)
+        return dropped
+
+    def _cmd_new(self, channel: Channel, chat_id: str, arg: str) -> str:
+        if not self._turn.acquire(blocking=False):
+            return "Busy with a message — send /stop first, then /new."
+        try:
+            session_id = f"{channel.name}-{chat_id}"
+            with self._agents_lock:
+                agent = self._agents.pop(session_id, None)
+            store = getattr(agent, "store", None) if agent is not None else None
+            if store is None:  # no agent built yet in this run: ask a fresh one for its store
+                store = getattr(self._agent(channel, chat_id), "store", None)
+                with self._agents_lock:
+                    self._agents.pop(session_id, None)
+            archived = store.archive_session(session_id) if store is not None else None
+            return "🆕 Fresh conversation." + (" The old one is saved and still searchable." if archived else "")
+        finally:
+            self._turn.release()
+
+    def _cmd_model(self, channel: Channel, chat_id: str, arg: str) -> str:
+        agent = self._agent(channel, chat_id)
+        router = agent.router
+        current = agent.provider or router.default
+        if not arg:
+            rows = [f"{'▶' if n == current else '·'} {n} → {p.model}" for n, p in router.providers.items()]
+            return "Models:\n" + "\n".join(rows) + "\n\nSwitch: /model <name>   ·   back to the default: /model default"
+        if not self._turn.acquire(blocking=False):
+            return "Busy with a message — try again when it's done (or /stop)."
+        try:
+            if arg == "default":
+                agent.provider = None
+                return f"Back to the default: {router.default} → {router.providers[router.default].model}"
+            if arg not in router.providers:
+                return f"No model named '{arg}'. Have: {', '.join(router.providers)}"
+            agent.provider = arg
+            return f"✅ This chat now uses {arg} → {router.providers[arg].model} (until /model default or a restart)."
+        finally:
+            self._turn.release()
 
     # --- lifecycle ---
     def start(self) -> None:
@@ -825,7 +1169,7 @@ def add_send_message_tool(registry, hub: ChannelHub) -> None:
     registry.tool(
         "send_message",
         "Send a message to the owner on a chat channel (" + channels + "). Use it to proactively reach the owner — a "
-        "finding, a reminder, the result of long work. By default it replies in the chat you are handling; pass "
+        "finding, a reminder, the result of long work (not for progress: in a chat the owner already sees your steps live). By default it replies in the chat you are handling; pass "
         "channel (and optionally chat_id) to target another one.",
         {"type": "object", "properties": {
             "text": {"type": "string", "description": "the message to send"},

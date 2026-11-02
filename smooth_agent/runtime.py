@@ -67,7 +67,11 @@ def build_runtime(config_path: str | None = None, *, approver: Approver | None =
     for k, v in (overrides or {}).items():
         setattr(st, k, v)
     router = Router.from_config(cfg)
-    ws = Workspace(workspace or (Path(st.workspace).expanduser() if st.workspace else Path.cwd() / "workspace"))
+    default_ws = home / "workspace"  # one fixed place: the persona files live here and the agent can edit them
+    ws = Workspace(workspace or (Path(st.workspace).expanduser() if st.workspace else default_ws), access=st.files)
+    if ws.root == default_ws.resolve():
+        from .persona import ensure_persona
+        ensure_persona(ws.root)  # empty templates; unused until the owner (or the agent) writes in them
     secret_envs = tuple(p.key_env for p in router.providers.values() if p.key_env)
     warnings: list[str] = []
     closers: list[Callable[[], None]] = []
@@ -130,10 +134,11 @@ def build_runtime(config_path: str | None = None, *, approver: Approver | None =
                            optional=st.optional_skills, enabled=set(st.enable_skills))
     system = DEFAULT_SYSTEM + (f"\n\nOwner instructions:\n{st.instructions}" if st.instructions else "")
     system += _clock(st.timezone)
+    system += _whereabouts(home, config_path or find_config(), ws.root, st)
     agent = Agent(router, reg, system=system, provider=provider, max_steps=max_steps or st.max_steps,
                   max_tokens=st.max_tokens, skills=lib, delegate=st.delegate, delegate_steps=st.delegate_steps,
                   processes=pm, store=store, memory=mem, session_id=sid, context_tokens=st.context_tokens,
-                  keep_recent=st.keep_recent, model=model)
+                  keep_recent=st.keep_recent, model=model, persona_dirs=[ws.root, home])
     if st.memory:
         rt_ref["agent"] = agent
     return Runtime(agent=agent, router=router, registry=reg, workspace=ws, settings=st, config=cfg, home=home,
@@ -154,7 +159,8 @@ def build_chat_agent(rt: Runtime, session_id: str, channel: str = "cli", chat_id
     agent = Agent(rt.router, reg, system=system, max_steps=st.max_steps, max_tokens=st.max_tokens,
                   skills=rt.agent.skills, delegate=st.delegate, delegate_steps=st.delegate_steps,
                   processes=rt.processes, store=rt.store, memory=rt.memory, session_id=session_id,
-                  context_tokens=st.context_tokens, keep_recent=st.keep_recent)
+                  context_tokens=st.context_tokens, keep_recent=st.keep_recent,
+                  persona_dirs=[rt.workspace.root, rt.home])
     if rt.store is not None and rt.store.session_messages(session_id):
         agent.resume(session_id)  # continue where this chat left off
     return agent
@@ -163,9 +169,25 @@ def build_chat_agent(rt: Runtime, session_id: str, channel: str = "cli", chat_id
 CHAT_STYLE = (
     "\n\nYou are chatting with the owner on {channel}. Write like a helpful person in a chat, not a report: reply in "
     "the owner's language and match their tone (often casual Indonesian — answer casually too), be friendly and "
-    "natural, keep it short, use short paragraphs or a simple list, and avoid headers and tables. Before long work, "
-    "say in one line what you are about to do."
+    "natural, keep it short, use short paragraphs or a simple list, and avoid headers and tables. The owner sees "
+    "each tool step live while you work (one progress message that disappears when you answer), so do not send "
+    "progress updates with send_message; just do the work and give the final answer. **bold**, `code` and code "
+    "blocks are rendered."
 )
+
+
+def _whereabouts(home: Path, config: Path | None, workspace: Path, st: Settings) -> str:
+    """Where this install lives, so the agent never guesses a default path (e.g. the wrong ~/.smooth-agent)."""
+    term = "on (each command asks the owner first)" if st.terminal and st.confirm else ("on" if st.terminal else "off")
+    if st.files == "full":
+        files = ("your file tools reach the whole machine: absolute or ~ paths anywhere, relative paths stay in the "
+                 "workspace; writing outside the workspace and reading secret files (keys, .env, ~/.ssh) ask the owner first")
+    else:
+        files = ('your file tools can only touch the workspace; the owner can open the whole machine with '
+                 '[tools] files = "full"')
+    return (f"\n\nThis install: home {home}; config {config or home / 'config.toml'}; keys in {home / '.env'}; "
+            f"workspace {workspace} ({files}). Terminal/shell tools: {term}; the owner turns them on with "
+            "[tools] terminal = true in the config, then restarts the service.")
 
 
 def _clock(tz_name: str) -> str:

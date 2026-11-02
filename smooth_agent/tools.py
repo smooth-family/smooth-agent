@@ -106,19 +106,54 @@ class Registry:
 
 # ---------- workspace (path containment) ----------
 
-class Workspace:
-    """A single directory the agent may read and write. All paths are resolved
-    and checked to stay inside it."""
+SECRET_NAMES = {".netrc", ".git-credentials", ".pgpass", "shadow", "gshadow", "sudoers", "credentials",
+                "id_rsa", "id_ed25519", "id_ecdsa", "id_dsa", "secring.gpg"}
+SECRET_SUFFIXES = (".pem", ".key", ".p12", ".pfx", ".kdbx", ".keystore", ".jks")
+SECRET_DIRS = {".ssh", ".gnupg", ".aws", ".kube", ".docker", ".password-store"}
+FILE_ACCESS = ("workspace", "full")
 
-    def __init__(self, root: str | os.PathLike[str]):
+
+def is_secret(p: Path) -> bool:
+    """Files that hold keys or passwords: reading one outside the workspace needs the owner's OK."""
+    name = p.name.lower()
+    if name in ("known_hosts", "authorized_keys") or name.endswith(".pub"):
+        return False
+    if name in SECRET_NAMES or name == ".env" or name.startswith(".env.") or name.endswith(SECRET_SUFFIXES):
+        return True
+    return any(part in SECRET_DIRS for part in p.parts)
+
+
+class Workspace:
+    """The folder the agent works in. With access = "workspace" (the default) every path must
+    stay inside it. With access = "full" the file tools reach the whole machine (absolute or
+    ~ paths; relative paths stay in the workspace), but writing outside the workspace and
+    reading secret files (keys, .env, ~/.ssh, …) first ask the owner through `approve`."""
+
+    def __init__(self, root: str | os.PathLike[str], access: str = "workspace"):
         self.root = Path(root).expanduser().resolve()
         self.root.mkdir(parents=True, exist_ok=True)
+        self.access = access if access in FILE_ACCESS else "workspace"
+        self.approve: Callable[[str, str], bool] | None = None  # (what, path) -> allowed?
 
-    def resolve(self, rel: str) -> Path:
-        p = (self.root / str(rel)).resolve()
-        if p != self.root and self.root not in p.parents:
-            raise ToolError(f"path '{rel}' is outside the workspace")
+    def inside(self, p: Path) -> bool:
+        return p == self.root or self.root in p.parents
+
+    def resolve(self, rel: str, *, write: bool = False) -> Path:
+        p = (self.root / os.path.expanduser(str(rel))).resolve()
+        if self.inside(p):
+            return p
+        if self.access != "full":
+            raise ToolError(f"path '{rel}' is outside the workspace (the owner can open the whole machine with "
+                            '[tools] files = "full")')
+        if write or is_secret(p):
+            what = "write outside the workspace" if write else "read a file that may hold secrets"
+            if not (self.approve and self.approve(what, str(p))):
+                raise ToolError(f"the owner did not allow this ({what}): {p}")
         return p
+
+    def show(self, p: Path) -> str:
+        """A path for messages: relative inside the workspace, absolute outside."""
+        return str(p.relative_to(self.root)) if self.inside(p) else str(p)
 
 
 MAX_READ_BYTES = 200_000
@@ -295,6 +330,7 @@ def default_registry(workspace: Workspace, *, allow_http: bool = True, terminal:
                      search_backend: str = "auto", processes: Any = None) -> Registry:
     reg = Registry(approver)
     code = terminal if code is None else code
+    workspace.approve = lambda what, path: bool(approver and approver(f"files: {what}", {"path": path}))
 
     @reg.tool("now", "Current UTC date and time (ISO 8601).", {"type": "object", "properties": {}})
     def _now(_args: dict[str, Any]) -> str:
@@ -315,7 +351,7 @@ def default_registry(workspace: Workspace, *, allow_http: bool = True, terminal:
         for child in sorted(d.iterdir()):
             kind = "dir" if child.is_dir() else "file"
             size = child.stat().st_size if child.is_file() else ""
-            out.append(f"{kind}\t{size}\t{child.relative_to(workspace.root)}")
+            out.append(f"{kind}\t{size}\t{workspace.show(child)}")
         return "\n".join(out) or "(empty)"
 
     @reg.tool(
@@ -357,10 +393,10 @@ def default_registry(workspace: Workspace, *, allow_http: bool = True, terminal:
          "required": ["path", "content"]},
     )
     def _write_file(args: dict[str, Any]) -> str:
-        p = workspace.resolve(args["path"])
+        p = workspace.resolve(args["path"], write=True)
         p.parent.mkdir(parents=True, exist_ok=True)
         p.write_text(str(args.get("content", "")), encoding="utf-8")
-        return f"wrote {len(str(args.get('content', '')))} chars to {p.relative_to(workspace.root)}"
+        return f"wrote {len(str(args.get('content', '')))} chars to {workspace.show(p)}"
 
     @reg.tool(
         "patch",
@@ -378,7 +414,7 @@ def default_registry(workspace: Workspace, *, allow_http: bool = True, terminal:
     def _patch(args: dict[str, Any]) -> str:
         mode = args.get("mode") or ("patch" if args.get("patch") else "replace")
         if mode == "replace":
-            p = workspace.resolve(args.get("path") or "")
+            p = workspace.resolve(args.get("path") or "", write=True)
             if not p.is_file():
                 raise ToolError(f"no such file: {args.get('path')}")
             old, new = args.get("old_string"), args.get("new_string", "")
@@ -391,13 +427,14 @@ def default_registry(workspace: Workspace, *, allow_http: bool = True, terminal:
             if n > 1 and not args.get("replace_all"):
                 raise ToolError(f"old_string matches {n} places; add surrounding lines to make it unique or set replace_all")
             p.write_text(text.replace(old, str(new)) if args.get("replace_all") else text.replace(old, str(new), 1), encoding="utf-8")
-            return f"replaced {n if args.get('replace_all') else 1} occurrence(s) in {p.relative_to(workspace.root)}"
+            return f"replaced {n if args.get('replace_all') else 1} occurrence(s) in {workspace.show(p)}"
         diff = str(args.get("patch") or "")
         if not diff.strip():
             raise ToolError("patch text is required for mode=patch")
         for target in re.findall(r"^(?:\+\+\+|---) (?:[ab]/)?(\S+)", diff, re.M):
             if target != "/dev/null":
-                workspace.resolve(target)  # raises if a path escapes the workspace
+                if not workspace.inside((workspace.root / target).resolve()):  # diffs apply in the workspace only
+                    raise ToolError(f"diff target {target} is outside the workspace; use mode=replace with a full path")
         for cmd in (["git", "apply", "--unsafe-paths", "--whitespace=nowarn", "-"], ["patch", "-p1", "--forward"], ["patch", "-p0", "--forward"]):
             try:
                 r = subprocess.run(cmd, input=diff.encode(), cwd=str(workspace.root), capture_output=True, timeout=30)
@@ -427,13 +464,21 @@ def default_registry(workspace: Workspace, *, allow_http: bool = True, terminal:
         pattern = str(args["pattern"])
         glob = args.get("file_glob")
         skip_dirs = {".git", "node_modules", "__pycache__", ".venv", "venv"}
+        system_dirs = {"/proc", "/sys", "/dev", "/run", "/snap"}  # pseudo files: endless or blocking
+        scanned = 0
 
         def files():
+            nonlocal scanned
             for root, dirs, names in os.walk(base):
-                dirs[:] = [d for d in dirs if d not in skip_dirs]
+                dirs[:] = [d for d in dirs if d not in skip_dirs and str(Path(root) / d) not in system_dirs]
                 for n in names:
+                    scanned += 1
+                    if scanned > 200_000:
+                        return
                     fp = Path(root) / n
-                    rel = str(fp.relative_to(workspace.root))
+                    if not workspace.inside(fp) and is_secret(fp):
+                        continue  # never grep through keys outside the workspace
+                    rel = workspace.show(fp)
                     if glob and not fnmatch.fnmatch(n, glob) and not fnmatch.fnmatch(rel, glob):
                         continue
                     yield fp, rel

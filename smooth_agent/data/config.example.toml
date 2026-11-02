@@ -18,9 +18,10 @@ model = "deepseek-chat"       # MODEL
 # key_env = "SMOOTH_ROUTER_KEY"
 
 [agent]
-# workspace = "~/smooth-workspace"   # the folder the agent reads and writes (default ./workspace)
+# workspace = "~/smooth-workspace"   # the folder the agent reads and writes (default ~/.smooth-agent/workspace,
+                                     # where SOUL.md, IDENTITY.md, USER.md, AGENTS.md, TOOLS.md, MEMORY.md live)
 max_steps = 12                        # tool rounds per message
-max_tokens = 1536
+max_tokens = 4096                     # per reply; reasoning models think inside this budget
 # instructions = "Answer in Indonesian. Keep replies short."
 # timezone = "Asia/Jakarta"          # for schedules and "tomorrow at 9" (default: this machine's)
 memory = true                         # long-term memory + saved, searchable sessions
@@ -30,6 +31,8 @@ keep_recent = 10                      # messages kept word-for-word when summari
 [tools]
 http = true            # web_search, web_extract, http_get
 search = "auto"        # auto: Tavily / Brave / SearXNG when TAVILY_API_KEY / BRAVE_API_KEY / SEARXNG_URL is set, else DuckDuckGo
+files = "workspace"    # "full" = file tools reach the whole machine; writes outside the workspace
+                       #   and secret files (keys, .env, ~/.ssh) ask you first
 terminal = false       # shell commands + Python on this machine (as your user), and background processes
 confirm = true         # ask before every terminal / execute_code call
 timeout = 180          # seconds per command

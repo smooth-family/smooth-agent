@@ -129,6 +129,19 @@ class Store:
                       (sid, title, channel, now, now, json.dumps(meta or {})))
         return sid
 
+    def archive_session(self, sid: str) -> str | None:
+        """Move a session's messages to a new id (`<sid>~<time>`) so `sid` starts empty. Returns the archive id."""
+        row = self.one("SELECT * FROM sessions WHERE id=?", (sid,))
+        if not row:
+            return None
+        new_id = f"{sid}~{time.strftime('%Y%m%d-%H%M%S')}"
+        with self.tx() as c:
+            c.execute("INSERT INTO sessions (id, title, channel, created, updated, meta) VALUES (?,?,?,?,?,?)",
+                      (new_id, row["title"], row["channel"], row["created"], row["updated"], row["meta"]))
+            c.execute("UPDATE messages SET session_id=? WHERE session_id=?", (new_id, sid))
+            c.execute("DELETE FROM sessions WHERE id=?", (sid,))
+        return new_id
+
     def label_session(self, sid: str, channel: str) -> None:
         with self.tx() as c:
             c.execute("UPDATE sessions SET channel=? WHERE id=? AND channel IS NOT ?", (channel, sid, channel))

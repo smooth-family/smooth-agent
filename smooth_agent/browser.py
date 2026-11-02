@@ -361,7 +361,7 @@ def add_browser_tools(reg: Registry, session: BrowserSession, workspace: Workspa
         name = "".join(c for c in str(a.get("filename") or "") if c.isalnum() or c in "-_") or time.strftime("%Y%m%d-%H%M%S")
         p = d / f"{name}.png"
         p.write_bytes(data)
-        return f"saved {p.relative_to(workspace.root)}"
+        return f"saved {workspace.show(p)}"
 
     if describe_image is not None:
         @reg.tool("browser_vision", "Look at the current page as an image and answer a question (layout, charts, captchas you may "

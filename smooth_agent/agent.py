@@ -12,6 +12,7 @@ stages (see ROADMAP.md).
 from __future__ import annotations
 
 import json
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
@@ -65,7 +66,8 @@ class Agent:
                  on_event: Callable[[str, dict[str, Any]], None] | None = None,
                  skills: SkillLibrary | None = None, delegate: bool = False, delegate_steps: int = 10,
                  processes: Any = None, store: Any = None, memory: Any = None, session_id: str | None = None,
-                 context_tokens: int = 64_000, keep_recent: int = 10, model: str | None = None):
+                 context_tokens: int = 64_000, keep_recent: int = 10, model: str | None = None,
+                 persona_dirs: list[Any] | None = None, max_continues: int = 2):
         self.router = router
         self.registry = registry
         self.system = system
@@ -82,6 +84,10 @@ class Agent:
         self.context_tokens = context_tokens
         self.keep_recent = keep_recent
         self._recall = ""
+        self.persona_dirs = list(persona_dirs or [])  # where SOUL.md, USER.md, … are looked up
+        self.max_continues = max_continues            # extra calls when an answer is cut off at max_tokens
+        self.cancel = threading.Event()               # set from another thread (/stop) to end the turn early
+        self.last_provider = ""                       # "name (model)" that answered last, for /status
         if skills is not None and registry is not None and not registry.get("skill_view"):
             from .skills import add_skill_tools
             add_skill_tools(registry, skills)
@@ -95,6 +101,9 @@ class Agent:
 
     def _system_prompt(self) -> str:
         parts = [self.system]
+        if self.persona_dirs:
+            from .persona import persona_text
+            parts.append(persona_text(self.persona_dirs))
         if self.memory is not None:
             from .memory import MEMORY_PROMPT
             parts.append(MEMORY_PROMPT)
@@ -182,6 +191,39 @@ class Agent:
         self.history = [self.history[0], {"role": "user", "content": NOTICE + "Summary of the earlier part of this conversation:\n" + summary}] + recent
         self.on_event("compressed", {"messages": len(old), "tokens": self._size(self.history)})
 
+
+    # ---------- turn helpers ----------
+
+    def _count(self, c: Any, usage_total: dict[str, int]) -> None:
+        for k, v in (c.usage or {}).items():
+            if isinstance(v, int):
+                usage_total[k] = usage_total.get(k, 0) + v
+        self.last_provider = f"{c.provider} ({c.model})" if c.model else str(c.provider)
+
+    def _continue_if_cut(self, c: Any, usage_total: dict[str, int]) -> str:
+        """An answer that stopped at max_tokens is continued (up to max_continues times) and joined."""
+        text = c.text or ""
+        for _ in range(self.max_continues):
+            if c.finish_reason != "length" or self.cancel.is_set():
+                break
+            self._push({"role": "user", "content": NOTICE + "Your last reply was cut off by the length limit. "
+                        "Continue exactly where it stopped: no repetition, no preamble."})
+            try:
+                c = self.router.complete(self.history, provider=self.provider, model=self.model,
+                                         max_tokens=self.max_tokens)
+            except RouterError as e:
+                self.on_event("error", {"message": f"could not continue the answer: {e}"})
+                break
+            self._count(c, usage_total)
+            self._push(c.message or {"role": "assistant", "content": c.text})
+            text += c.text or ""
+        return text
+
+    def _cancelled(self, step: int, used: list, usage_total: dict) -> Turn:
+        self._push({"role": "user", "content": NOTICE + "The owner stopped this turn (/stop)."})
+        self._push({"role": "assistant", "content": "(stopped)"})
+        return Turn(text="(stopped)", steps=step, tool_calls=used, usage=usage_total, stopped="cancelled")
+
     # ---------- the loop ----------
 
     def run(self, user_message: str) -> Turn:
@@ -193,6 +235,7 @@ class Agent:
         # refresh the system prompt: memories and skills changed last turn show up now
         if self.history and self.history[0].get("role") == "system":
             self.history[0] = {"role": "system", "content": self._system_prompt()}
+        self.cancel.clear()
         self._push({"role": "user", "content": user_message})
         tools = self.registry.schemas() if self.registry else None
         extra = {"tools": tools, "tool_choice": "auto"} if tools else {}
@@ -200,6 +243,8 @@ class Agent:
         usage_total: dict[str, int] = {}
 
         for step in range(1, self.max_steps + 1):
+            if self.cancel.is_set():
+                return self._cancelled(step, used, usage_total)
             self._deliver_process_notices()
             self._maybe_compress()
             try:
@@ -209,16 +254,15 @@ class Agent:
                 self.on_event("error", {"message": str(e)})
                 return Turn(text=f"(model error: {e})", steps=step, tool_calls=used, usage=usage_total, stopped="error")
 
-            for k, v in (c.usage or {}).items():
-                if isinstance(v, int):
-                    usage_total[k] = usage_total.get(k, 0) + v
+            self._count(c, usage_total)
 
             if not c.tool_calls:
                 # a plain answer ends the turn
                 self._push(c.message or {"role": "assistant", "content": c.text})
-                if c.text:
-                    self.on_event("text", {"text": c.text})
-                return Turn(text=c.text, steps=step, tool_calls=used, usage=usage_total)
+                text = self._continue_if_cut(c, usage_total)
+                if text:
+                    self.on_event("text", {"text": text})
+                return Turn(text=text, steps=step, tool_calls=used, usage=usage_total)
 
             # record the assistant's tool-call message, then run each call
             self._push(c.message or {"role": "assistant", "content": c.text or None, "tool_calls": c.tool_calls})
@@ -226,8 +270,11 @@ class Agent:
                 fn = (call.get("function") or {})
                 name = fn.get("name", "")
                 args = parse_arguments(fn.get("arguments"))
-                self.on_event("tool", {"name": name, "arguments": args})
-                result = self.registry.run(name, args) if self.registry else "error: no tools available"
+                if self.cancel.is_set():  # every tool call still gets a result, or the history is invalid
+                    result = "cancelled: the owner stopped this turn before the call ran"
+                else:
+                    self.on_event("tool", {"name": name, "arguments": args})
+                    result = self.registry.run(name, args) if self.registry else "error: no tools available"
                 used.append({"name": name, "arguments": args})
                 self.on_event("tool_result", {"name": name, "result": result})
                 self._push({
