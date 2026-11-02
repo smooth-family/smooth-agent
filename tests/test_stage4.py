@@ -268,6 +268,20 @@ class TelegramParseTests(unittest.TestCase):
         self.assertEqual(hub.resolved[-1], ("ABC123", False))
 
 
+class TelegramSendTests(unittest.TestCase):
+    def test_send_raises_when_telegram_refuses(self):
+        tg = TelegramChannel(ChannelConfig("telegram", owners=["1"], options={"token": "x"}), log=lambda m: None)
+        tg._api = lambda method, payload, **k: {"ok": False, "error_code": 403,
+                                                "description": "Forbidden: bot can't initiate conversation with a user"}
+        with self.assertRaises(RuntimeError) as cm:
+            tg.send("1", "hi")
+        self.assertIn("can't initiate", str(cm.exception))
+        sent = []
+        tg._api = lambda method, payload, **k: sent.append(payload) or {"ok": True}
+        tg.send("1", "hi")
+        self.assertEqual(sent[0]["text"], "hi")
+
+
 class WhatsAppWebhookTests(unittest.TestCase):
     def _ch(self):
         return WhatsAppChannel(ChannelConfig("whatsapp", owners=["628"],

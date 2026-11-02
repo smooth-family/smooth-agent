@@ -170,7 +170,9 @@ class TelegramChannel(Channel):
             payload: dict[str, Any] = {"chat_id": chat_id, "text": part, "disable_web_page_preview": True}
             if buttons and i == len(parts) - 1:
                 payload["reply_markup"] = {"inline_keyboard": [[{"text": t, "callback_data": d} for t, d in buttons]]}
-            self._api("sendMessage", payload)
+            data = self._api("sendMessage", payload)
+            if not data.get("ok"):  # e.g. 403 "bot can't initiate conversation": the owner never pressed Start
+                raise RuntimeError(f"telegram sendMessage: {data.get('description') or data}")
 
     def typing(self, chat_id: str) -> None:
         try:

@@ -217,6 +217,7 @@ def _cmd_run(args) -> int:
 def _cmd_setup(args) -> int:
     from .banner import Steps, bold, cyan, dim, print_banner
     home = ensure_home()
+    load_dotenv(home / ".env")  # a key already saved in .env counts as set
     cfg_path = home / "config.toml"
     example = Path(__file__).parent / "data" / "config.example.toml"
     interactive = sys.stdin.isatty()
