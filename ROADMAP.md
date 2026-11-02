@@ -76,7 +76,16 @@ Still to do:
 - Two-way Discord (bot gateway), Signal, MS Teams, Google Chat, Feishu/Lark,
   Mattermost, email, SMS — on the same `Channel` base.
 - Approval buttons on Slack / LINE / Matrix (typed yes/no works today).
-- Voice notes and images from chat into the agent.
+
+## Stage 5 — Chat as the main way to use it (v0.6.0)
+
+- Commands (`/new`, `/status`, `/model`, `/stop`, `/help`) and live shell-style progress.
+- Files in (photos, PDF, Office, OpenDocument, archives incl. RAR) and out (`create_document`,
+  `send_file`); voice notes in, optional voice replies.
+- Persona files, whole-machine file access with approvals, continued long answers.
+
+Still to do: receiving files and voice on WhatsApp, Slack, Matrix and LINE; approval buttons on
+Slack, LINE and Matrix.
 
 ## Later
 

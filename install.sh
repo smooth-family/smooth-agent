@@ -9,7 +9,6 @@
 #   --method pipx|venv        how to install         (SMOOTH_AGENT_METHOD, default: pipx if present, else venv)
 #   --browser                 add browser automation (SMOOTH_AGENT_EXTRAS=browser)
 #   --no-setup                skip the setup wizard  (SMOOTH_AGENT_NO_SETUP=1)
-# Private repo: export GITHUB_TOKEN=... first (sent as a one-off header, never saved).
 #
 # Everything runs as your user; nothing is installed system-wide.
 
@@ -63,15 +62,8 @@ find_python() {
   return 1
 }
 
-git_clone() {  # git_clone <url> <ref> <dest>; a token, if any, goes in a one-off header
-  local url=$1 ref=$2 dest=$3
-  if [ -n "${GITHUB_TOKEN:-}" ] && [[ "$url" == https://github.com/* ]]; then
-    local auth
-    auth=$(printf 'x-access-token:%s' "$GITHUB_TOKEN" | base64 | tr -d '\n')
-    git -c "http.extraHeader=Authorization: Basic $auth" clone --quiet --depth 1 --branch "$ref" "$url" "$dest"
-  else
-    GIT_TERMINAL_PROMPT=0 git clone --quiet --depth 1 --branch "$ref" "$url" "$dest"
-  fi
+git_clone() {  # git_clone <url> <ref> <dest>
+  GIT_TERMINAL_PROMPT=0 git clone --quiet --depth 1 --branch "$2" "$1" "$3"
 }
 
 # ---------------------------------------------------------------- main
@@ -132,7 +124,7 @@ main() {
     SA_TMP="$(mktemp -d)"  # global: the EXIT trap runs after main() returns
     trap 'rm -rf "${SA_TMP:-}"' EXIT
     git_clone "$source" "$ref" "$SA_TMP/smooth-agent" \
-      || die "could not download $source ($ref). Private repo? export GITHUB_TOKEN=... and rerun."
+      || die "could not download $source ($ref). Check your internet connection and rerun."
     rm -rf "$src"
     mv "$SA_TMP/smooth-agent" "$src"
     ok "downloaded $ref → $src"

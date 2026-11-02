@@ -4,7 +4,7 @@
 
 <p align="center">
   <a href="https://github.com/smooth-family/smooth-agent/actions/workflows/ci.yml"><img src="https://github.com/smooth-family/smooth-agent/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
-  <img src="https://img.shields.io/badge/version-0.5.0-5b8cff" alt="version 0.5.0">
+  <img src="https://img.shields.io/badge/version-0.6.0-5b8cff" alt="version 0.6.0">
   <img src="https://img.shields.io/badge/python-3.9%2B-3776AB?logo=python&logoColor=white" alt="Python 3.9+">
   <img src="https://img.shields.io/badge/channels-7-b65cff" alt="7 chat channels">
   <img src="https://img.shields.io/badge/docker-ready-2496ED?logo=docker&logoColor=white" alt="Docker">
@@ -31,10 +31,6 @@ It checks your machine, installs with `pipx` (or a private virtualenv in
 wizard. Nothing is installed system-wide. Options: `--browser` (adds browser
 automation), `--method pipx|venv`, `--ref <tag>`, `--no-setup`.
 
-> While the repository is private, export a GitHub token first:
-> `export GITHUB_TOKEN=…` and fetch the script with
-> `curl -fsSL -H "Authorization: Bearer $GITHUB_TOKEN" https://raw.githubusercontent.com/smooth-family/smooth-agent/main/install.sh | bash`.
-> The installer sends the token as a one-off header and never saves it.
 
 <p align="center"><img src="docs/assets/install.svg" alt="The installer" width="720"></p>
 

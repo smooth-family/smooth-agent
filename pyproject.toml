@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "smooth-agent"
-version = "0.5.0"
+version = "0.6.0"
 description = "Self-hostable, multi-router AI agent with tools, skills and sub-agents."
 requires-python = ">=3.9"
 license = { text = "MIT" }
@@ -30,11 +30,15 @@ smooth-agent = "smooth_agent.cli:main"
 [tool.setuptools]
 packages = ["smooth_agent"]
 include-package-data = true
-license-files = ["LICENSE", "THIRD_PARTY_NOTICES.md"]
+license-files = ["LICENSE", "THIRD_PARTY_NOTICES.md", "LICENSES/*"]
 
 [tool.setuptools.package-data]
 # bundled skills (Markdown playbooks + their reference files and scripts)
 smooth_agent = ["skills/**/*", "data/*"]
+
+[tool.setuptools.exclude-package-data]
+# never ship caches left behind by running a skill's scripts or the tests
+smooth_agent = ["**/__pycache__/*", "**/*.pyc", "**/.DS_Store"]
 
 [tool.ruff]
 line-length = 120

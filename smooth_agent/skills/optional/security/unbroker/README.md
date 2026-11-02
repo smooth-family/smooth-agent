@@ -152,9 +152,11 @@ against broker sites is the active field-testing frontier.
 
 ## Credits and license
 
-- Broker dataset adapted from the **Big-Ass Data Broker Opt-Out List (BADBOOL)** by **Yael Grauer**,
+- Bundled broker records (`references/brokers/`): curated and field-verified entries only.
+- More brokers come from the **Big-Ass Data Broker Opt-Out List (BADBOOL)** by **Yael Grauer**,
   licensed [CC BY-NC-SA 4.0](https://creativecommons.org/licenses/by-nc-sa/4.0/) (attribution
-  required, non-commercial). See [yaelwrites.com](https://yaelwrites.com/).
+  required, non-commercial). It is **not bundled**: `scripts/badbool.py refresh` downloads it to your
+  machine when you run the skill, under its own license. See [yaelwrites.com](https://yaelwrites.com/).
 - Code: MIT.
 
 ## Disclaimer

@@ -1024,7 +1024,7 @@ HELP = (
     "remember things about you, run scheduled jobs and (if you turn it on) run commands on this machine.\n\n"
     "/new — start a fresh conversation (the old one is kept)\n"
     "/status — model, session, memory\n"
-    "/model — show or switch the model, e.g. /model jerouter\n"
+    "/model — show or switch the model, e.g. /model backup\n"
     "/stop — stop what I'm doing\n"
     "/help — this message"
 )
