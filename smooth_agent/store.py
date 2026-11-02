@@ -129,6 +129,10 @@ class Store:
                       (sid, title, channel, now, now, json.dumps(meta or {})))
         return sid
 
+    def label_session(self, sid: str, channel: str) -> None:
+        with self.tx() as c:
+            c.execute("UPDATE sessions SET channel=? WHERE id=? AND channel IS NOT ?", (channel, sid, channel))
+
     def add_message(self, sid: str, msg: dict[str, Any]) -> int:
         text = message_text(msg)
         now = time.time()

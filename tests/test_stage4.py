@@ -45,6 +45,41 @@ class DummyHub:
         self.resolved.append((key, ok))
 
 
+class ChatAgentSessionTests(unittest.TestCase):
+    """Per-chat agents on a real runtime: session label, repair, resume and chat style."""
+
+    def _rt(self, home):
+        import os
+        from unittest import mock
+        from smooth_agent.runtime import build_runtime
+        cfg = home / "config.toml"
+        cfg.write_text('default = "m"\n[providers.m]\nprovider = "openai-compatible"\nmodel = "x"\n'
+                       'base_url = "http://127.0.0.1:9/v1"\nkey_env = "K"\n[agent]\nmemory = true\n')
+        with mock.patch.dict(os.environ, {"SMOOTH_AGENT_HOME": str(home), "K": "k"}):
+            return build_runtime(str(cfg), connect_mcp=False, channel="channel")
+
+    def test_label_resume_and_style(self):
+        import tempfile
+        from pathlib import Path
+        from smooth_agent.runtime import build_chat_agent
+        home = Path(tempfile.mkdtemp())
+        with self._rt(home) as rt:
+            # a row saved by 0.5.0 under the wrong label, with one exchange in it
+            rt.store.new_session("telegram-42", channel="cli")
+            rt.store.add_message("telegram-42", {"role": "user", "content": "halo"})
+            rt.store.add_message("telegram-42", {"role": "assistant", "content": "siang"})
+            a = build_chat_agent(rt, "telegram-42", "telegram", "42")
+            row = rt.store.one("SELECT channel FROM sessions WHERE id='telegram-42'")
+            self.assertEqual(row["channel"], "telegram")  # repaired
+            self.assertEqual([m["content"] for m in a.history[1:]], ["halo", "siang"])  # resumed
+            self.assertIn("chatting with the owner on telegram", a.history[0]["content"])
+            b = build_chat_agent(rt, "slack-D1", "slack", "D1")  # brand new chat
+            self.assertEqual(rt.store.one("SELECT channel FROM sessions WHERE id='slack-D1'")["channel"], "slack")
+            self.assertEqual(len(b.history), 1)
+            ids = [r["id"] for r in rt.store.sessions(10, channel="cli")]
+            self.assertNotIn("telegram-42", ids)  # `run --resume` can no longer pick up a chat session
+
+
 class ChunkTests(unittest.TestCase):
     def test_chunk(self):
         self.assertEqual(chunk("short"), ["short"])

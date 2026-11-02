@@ -844,6 +844,9 @@ def _start_channels(args, home, log):
         return None, None
     for w in rt.warnings:
         log(f"  ! {w}")
+    if rt.store is not None and not rt.store.session_messages(rt.agent.session_id):
+        # the shared runtime's own agent is only a template for the per-chat agents: drop its empty session
+        rt.store.delete_session(rt.agent.session_id)
     channels = build_channels(chcfg.specs, log=log)
     if not channels:
         rt.close()
@@ -913,7 +916,7 @@ def _cmd_channels(args) -> int:
 LAUNCHD_LABEL = "family.smooth.agent"
 
 
-def service_files(home: Path, python: str | None = None) -> dict[str, str]:
+def service_files(home: Path, python: str | None = None, label: str = LAUNCHD_LABEL) -> dict[str, str]:
     """The service definitions for this install: a systemd user unit and a launchd plist.
     Both run `<this python> -m smooth_agent.cli daemon`, so a same-named script elsewhere
     on PATH can never be started by mistake."""
@@ -937,7 +940,7 @@ def service_files(home: Path, python: str | None = None) -> dict[str, str]:
         '<?xml version="1.0" encoding="UTF-8"?>\n'
         '<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">\n'
         '<plist version="1.0">\n<dict>\n'
-        f"  <key>Label</key>\n  <string>{LAUNCHD_LABEL}</string>\n"
+        f"  <key>Label</key>\n  <string>{escape(label)}</string>\n"
         f"  <key>ProgramArguments</key>\n  <array>{args}\n  </array>\n"
         "  <key>EnvironmentVariables</key>\n  <dict>\n"
         f"    <key>SMOOTH_AGENT_HOME</key>\n    <string>{escape(str(home))}</string>\n"
@@ -952,20 +955,26 @@ def service_files(home: Path, python: str | None = None) -> dict[str, str]:
 
 
 def _cmd_service(args) -> int:
+    import re
     home = ensure_home()
-    files = service_files(home)
+    name = args.name
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}", name):
+        return _err("--name: letters, digits, '.', '_' or '-'")
+    # one service per home: a second install on the same machine just needs another --name
+    label = LAUNCHD_LABEL if name == "smooth-agent" else f"family.smooth.{name}"
+    files = service_files(home, label=label)
     kind = args.kind or ("launchd" if sys.platform == "darwin" else "systemd")
     if kind == "launchd":
-        dest = Path.home() / "Library" / "LaunchAgents" / f"{LAUNCHD_LABEL}.plist"
+        dest = Path.home() / "Library" / "LaunchAgents" / f"{label}.plist"
         enable = (f"  launchctl bootstrap gui/$(id -u) {dest}\n"
-                  f"  launchctl kickstart -k gui/$(id -u)/{LAUNCHD_LABEL}   # restart\n"
+                  f"  launchctl kickstart -k gui/$(id -u)/{label}   # restart\n"
                   f"  tail -f {home / 'daemon.log'}   # logs")
     else:
-        dest = Path.home() / ".config" / "systemd" / "user" / "smooth-agent.service"
+        dest = Path.home() / ".config" / "systemd" / "user" / f"{name}.service"
         enable = ("  systemctl --user daemon-reload\n"
-                  "  systemctl --user enable --now smooth-agent\n"
+                  f"  systemctl --user enable --now {name}\n"
                   "  loginctl enable-linger $USER   # keep running after you log out (servers)\n"
-                  "  journalctl --user -u smooth-agent -f   # logs")
+                  f"  journalctl --user -u {name} -f   # logs")
     if not args.install:
         print(files[kind])
         print(f"# install: smooth-agent service --install{' --kind ' + kind if args.kind else ''}  (writes {dest})")
@@ -1071,6 +1080,7 @@ def build_parser() -> argparse.ArgumentParser:
     sp = sub.add_parser("service", help="print or install a background service for the daemon")
     sp.add_argument("--install", action="store_true", help="write it (systemd user unit / launchd agent)")
     sp.add_argument("--kind", choices=["systemd", "launchd"], help="default: launchd on macOS, systemd elsewhere")
+    sp.add_argument("--name", default="smooth-agent", help="service name (default smooth-agent; use another for a 2nd install)")
     sp.set_defaults(func=_cmd_service)
 
     sp = sub.add_parser("skills", help="list / search / install / remove skills")

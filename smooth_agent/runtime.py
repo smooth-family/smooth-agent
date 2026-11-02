@@ -146,15 +146,26 @@ def build_chat_agent(rt: Runtime, session_id: str, channel: str = "cli", chat_id
     each conversation keeps its own history across restarts."""
     reg = rt.registry.copy()  # its own copy so delegate/skill closures bind to this agent
     st = rt.settings
-    agent = Agent(rt.router, reg, system=rt.agent.system, max_steps=st.max_steps, max_tokens=st.max_tokens,
+    if rt.store is not None:
+        # create (and label) the session before the Agent does, or it would be saved as channel 'cli'
+        rt.store.new_session(session_id, channel=channel, meta={"chat_id": chat_id} if chat_id else None)
+        rt.store.label_session(session_id, channel)  # repair rows saved by 0.5.0 with the wrong label
+    system = rt.agent.system + (CHAT_STYLE.format(channel=channel) if channel not in ("cli", "cron") else "")
+    agent = Agent(rt.router, reg, system=system, max_steps=st.max_steps, max_tokens=st.max_tokens,
                   skills=rt.agent.skills, delegate=st.delegate, delegate_steps=st.delegate_steps,
                   processes=rt.processes, store=rt.store, memory=rt.memory, session_id=session_id,
                   context_tokens=st.context_tokens, keep_recent=st.keep_recent)
-    if rt.store is not None:
-        rt.store.new_session(session_id, channel=channel, meta={"chat_id": chat_id} if chat_id else None)
-        if rt.store.session_messages(session_id):
-            agent.resume(session_id)  # continue where this chat left off
+    if rt.store is not None and rt.store.session_messages(session_id):
+        agent.resume(session_id)  # continue where this chat left off
     return agent
+
+
+CHAT_STYLE = (
+    "\n\nYou are chatting with the owner on {channel}. Write like a helpful person in a chat, not a report: reply in "
+    "the owner's language and match their tone (often casual Indonesian — answer casually too), be friendly and "
+    "natural, keep it short, use short paragraphs or a simple list, and avoid headers and tables. Before long work, "
+    "say in one line what you are about to do."
+)
 
 
 def _clock(tz_name: str) -> str:
