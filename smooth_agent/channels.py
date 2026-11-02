@@ -622,6 +622,11 @@ class _Pending:
     ok: bool = False
 
 
+# typed answers to an approval prompt on channels without buttons (English + Indonesian)
+YES = {"y", "yes", "ya", "iya", "ok", "oke", "okay", "boleh", "allow", "lanjut", "gas", "✅"}
+NO = {"n", "no", "tidak", "nggak", "ngga", "gak", "ga", "jangan", "deny", "stop", "batal", "❌"}
+
+
 class ChannelHub:
     """Runs the channels and routes their messages to per-chat agent sessions.
 
@@ -642,6 +647,7 @@ class ChannelHub:
         self._q: "queue.Queue[tuple[Channel, Inbound] | None]" = queue.Queue()
         self._agents: dict[str, Any] = {}
         self._pending: dict[str, _Pending] = {}
+        self._awaiting: dict[tuple[str, str], str] = {}  # (channel, chat) -> approval key waiting for a typed yes/no
         self._active: tuple[Channel, str] | None = None  # (channel, chat_id) being handled now
         self._worker: threading.Thread | None = None
         self._webhook: WebhookServer | None = None
@@ -659,6 +665,13 @@ class ChannelHub:
             except Exception:
                 pass
             return
+        # a typed answer to an approval prompt: resolve it here, because the worker is blocked waiting for it
+        key = self._awaiting.get((channel.name, inbound.chat_id))
+        if key:
+            word = inbound.text.strip().lower().rstrip(".!")
+            if word in YES or word in NO:
+                self.resolve_approval(key, word in YES)
+                return
         self._q.put((channel, inbound))
 
     def resolve_approval(self, key: str, ok: bool) -> None:
@@ -681,17 +694,29 @@ class ChannelHub:
         key = uuid.uuid4().hex[:12]
         pending = self._pending[key] = _Pending(threading.Event())
         text = f"Run `{name}`?\n{preview}"
+        minutes = max(1, round(self.approval_timeout / 60))
         try:
             if channel.supports_buttons:
                 channel.send(chat_id, text, buttons=[("✅ Allow", f"a:{key}"), ("❌ Deny", f"d:{key}")])
             else:
-                channel.send(chat_id, text + "\n\n(reply 'yes' within the next couple of minutes to allow)")
+                self._awaiting[(channel.name, chat_id)] = key
+                channel.send(chat_id, text + f"\n\nReply yes to allow or no to deny (within {minutes} min; no reply = deny).")
         except Exception as e:
             self.log(f"{channel.name}: could not ask for approval: {e}")
             self._pending.pop(key, None)
+            self._awaiting.pop((channel.name, chat_id), None)
             return False
-        got = pending.event.wait(self.approval_timeout)
-        self._pending.pop(key, None)
+        try:
+            got = pending.event.wait(self.approval_timeout)
+        finally:
+            self._pending.pop(key, None)
+            if self._awaiting.get((channel.name, chat_id)) == key:
+                self._awaiting.pop((channel.name, chat_id), None)
+        if not got:
+            try:
+                channel.send(chat_id, f"No answer — `{name}` was not run.")
+            except Exception:
+                pass
         return bool(got and pending.ok)
 
     # --- proactive / cron delivery ---

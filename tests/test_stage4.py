@@ -147,6 +147,66 @@ class HubTests(unittest.TestCase):
         t.join(timeout=5)
         self.assertTrue(result.get("ok"))
 
+    def _approving_hub(self, timeout):
+        """A button-less channel whose agent asks for approval in the middle of its turn."""
+        ch = FakeChannel(owners=["1"])
+        ch.supports_buttons = False
+        box = {}
+
+        class AskingAgent:
+            def run(self, text):
+                ok = box["hub"].approve("terminal", {"command": "deploy"})
+                return Turn(text=f"ran={ok} after:{text}", steps=1)
+        hub = ChannelHub([ch], lambda *a: AskingAgent(), log=lambda m: None, approval_timeout=timeout)
+        box["hub"] = hub
+        hub.start()
+        return hub, ch
+
+    def _wait(self, cond, secs=5.0):
+        end = time.time() + secs
+        while not cond() and time.time() < end:
+            time.sleep(0.02)
+        return cond()
+
+    def test_typed_yes_approves_while_worker_waits(self):
+        from smooth_agent.channels import Inbound
+        hub, ch = self._approving_hub(timeout=10)
+        try:
+            hub.dispatch(ch, Inbound(channel="fake", chat_id="1", text="deploy it", user_id="1"))
+            self.assertTrue(self._wait(lambda: any("Reply yes" in t for _, t, _ in ch.sent)), ch.sent)
+            hub.dispatch(ch, Inbound(channel="fake", chat_id="1", text="Ya!", user_id="1"))
+            self.assertTrue(self._wait(lambda: any(t.startswith("ran=") for _, t, _ in ch.sent)), ch.sent)
+            self.assertIn("ran=True after:deploy it", [t for _, t, _ in ch.sent])
+            self.assertEqual(hub._awaiting, {})
+            self.assertTrue(hub._q.empty())  # "Ya!" was consumed as the answer, not queued as a message
+        finally:
+            hub.stop()
+
+    def test_typed_no_and_unrelated_text(self):
+        from smooth_agent.channels import Inbound
+        hub, ch = self._approving_hub(timeout=10)
+        try:
+            hub.dispatch(ch, Inbound(channel="fake", chat_id="1", text="deploy", user_id="1"))
+            self.assertTrue(self._wait(lambda: hub._awaiting))
+            hub.dispatch(ch, Inbound(channel="fake", chat_id="1", text="what is it doing?", user_id="1"))
+            self.assertEqual(hub._q.qsize(), 1)  # a real message is queued, not taken as an answer
+            hub.dispatch(ch, Inbound(channel="fake", chat_id="1", text="gak", user_id="1"))
+            self.assertTrue(self._wait(lambda: any(t == "ran=False after:deploy" for _, t, _ in ch.sent)), ch.sent)
+        finally:
+            hub.stop()
+
+    def test_no_answer_is_denied_and_said(self):
+        from smooth_agent.channels import Inbound
+        hub, ch = self._approving_hub(timeout=0.3)
+        try:
+            hub.dispatch(ch, Inbound(channel="fake", chat_id="1", text="deploy", user_id="1"))
+            self.assertTrue(self._wait(lambda: any(t.startswith("ran=") for _, t, _ in ch.sent)), ch.sent)
+            texts = [t for _, t, _ in ch.sent]
+            self.assertIn("ran=False after:deploy", texts)
+            self.assertTrue(any(t.startswith("No answer") for t in texts))
+        finally:
+            hub.stop()
+
     def test_failed_channel_is_dropped(self):
         class Broken(FakeChannel):
             def start(self, hub):
@@ -348,7 +408,7 @@ class DeliveryWebhookTests(unittest.TestCase):
 
 class SetupHelperTests(unittest.TestCase):
     def test_strip_channels_table(self):
-        import tomllib
+        from smooth_agent.config import tomllib
 
         from smooth_agent.cli import _strip_channels_table
         src = ('default = "m"\n[agent]\nx = 1\n[channels]\nenabled = []\n# [channels.telegram]\n'
@@ -360,7 +420,7 @@ class SetupHelperTests(unittest.TestCase):
         self.assertEqual(cfg["agent"], {"x": 1})
 
     def test_example_config_parses_with_all_channels(self):
-        import tomllib
+        from smooth_agent.config import tomllib
         from pathlib import Path
         from smooth_agent.channels import CHANNEL_TYPES
         ex = (Path(__file__).resolve().parents[1] / "smooth_agent" / "data" / "config.example.toml").read_text()
