@@ -147,6 +147,16 @@ class HubTests(unittest.TestCase):
         t.join(timeout=5)
         self.assertTrue(result.get("ok"))
 
+    def test_failed_channel_is_dropped(self):
+        class Broken(FakeChannel):
+            def start(self, hub):
+                raise RuntimeError("no token")
+        good, bad = FakeChannel(owners=["1"]), Broken(owners=["1"], name="broken")
+        hub = ChannelHub([good, bad], lambda *a: FakeAgent("x"), log=lambda m: None)
+        hub.start()
+        hub.stop()
+        self.assertEqual(list(hub.channels), ["fake"])
+
     def test_approval_no_active_chat(self):
         hub, _ = self._hub(FakeChannel(owners=["1"]))
         self.assertFalse(hub.approve("terminal", {}))
@@ -223,6 +233,140 @@ class WhatsAppWebhookTests(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertEqual(len(hub.dispatched), 1)
         self.assertEqual(hub.dispatched[0].text, "hello")
+
+
+def _slack_sig(secret, ts, body):
+    import hashlib
+    import hmac
+    return "v0=" + hmac.new(secret.encode(), b"v0:" + str(ts).encode() + b":" + body, hashlib.sha256).hexdigest()
+
+
+class SlackTests(unittest.TestCase):
+    def _ch(self):
+        from smooth_agent.channels import SlackChannel
+        ch = SlackChannel(ChannelConfig("slack", owners=["U1"], options={"token": "xoxb", "signing_secret": "s3"}),
+                          log=lambda m: None)
+        ch.hub = DummyHub()
+        return ch
+
+    def _post(self, ch, payload, *, ts=None, secret="s3", extra=None):
+        body = json.dumps(payload).encode()
+        ts = ts if ts is not None else int(time.time())
+        h = {"X-Slack-Request-Timestamp": str(ts), "X-Slack-Signature": _slack_sig(secret, ts, body), **(extra or {})}
+        return ch.handle_webhook("POST", "/webhook/slack", h, body)
+
+    def test_url_verification(self):
+        self.assertEqual(self._post(self._ch(), {"type": "url_verification", "challenge": "abc"}), (200, b"abc"))
+
+    def test_message_and_filters(self):
+        ch = self._ch()
+        ev = {"type": "event_callback", "event": {"type": "message", "user": "U1", "channel": "D9", "text": "hi"}}
+        self.assertEqual(self._post(ch, ev)[0], 200)
+        self.assertEqual((ch.hub.dispatched[0].chat_id, ch.hub.dispatched[0].user_id), ("D9", "U1"))
+        self._post(ch, {"event": {"type": "message", "bot_id": "B", "channel": "D9", "text": "echo"}})
+        self._post(ch, {"event": {"type": "message", "subtype": "message_changed", "channel": "D9", "text": "x"}})
+        self._post(ch, ev, extra={"X-Slack-Retry-Num": "1"})
+        self.assertEqual(len(ch.hub.dispatched), 1)  # bot echo, edits and retries ignored
+
+    def test_bad_signature_and_replay(self):
+        ch = self._ch()
+        ev = {"event": {"type": "message", "user": "U1", "channel": "D", "text": "x"}}
+        self.assertEqual(self._post(ch, ev, secret="wrong")[0], 401)
+        self.assertEqual(self._post(ch, ev, ts=int(time.time()) - 3600)[0], 401)  # stale timestamp
+        self.assertEqual(ch.handle_webhook("POST", "/webhook/slack", {}, b"{}")[0], 401)
+        self.assertEqual(ch.hub.dispatched, [])
+
+
+class LineTests(unittest.TestCase):
+    def test_verify_and_parse(self):
+        import base64
+        import hashlib
+        import hmac
+        from smooth_agent.channels import LineChannel
+        ch = LineChannel(ChannelConfig("line", owners=["Uabc"], options={"token": "t", "secret": "sec"}), log=lambda m: None)
+        ch.hub = DummyHub()
+        body = json.dumps({"events": [
+            {"type": "message", "message": {"type": "text", "text": "halo"}, "source": {"type": "user", "userId": "Uabc"}},
+            {"type": "message", "message": {"type": "sticker"}, "source": {"userId": "Uabc"}},
+            {"type": "follow", "source": {"userId": "Uabc"}},
+        ]}).encode()
+        sig = base64.b64encode(hmac.new(b"sec", body, hashlib.sha256).digest()).decode()
+        self.assertEqual(ch.handle_webhook("POST", "/webhook/line", {"x-line-signature": sig}, body)[0], 200)
+        self.assertEqual(len(ch.hub.dispatched), 1)
+        self.assertEqual((ch.hub.dispatched[0].chat_id, ch.hub.dispatched[0].text), ("Uabc", "halo"))
+        self.assertEqual(ch.handle_webhook("POST", "/webhook/line", {"x-line-signature": "nope"}, body)[0], 401)
+
+
+class MatrixTests(unittest.TestCase):
+    def test_sync_messages_echo_and_invite(self):
+        from smooth_agent.channels import MatrixChannel
+        ch = MatrixChannel(ChannelConfig("matrix", owners=["@me:hs"], options={"token": "t", "user_id": "@bot:hs"}),
+                           log=lambda m: None)
+        ch.hub = DummyHub()
+        calls = []
+        ch._req = lambda method, path, payload=None, **k: calls.append((method, path)) or {}
+        ch._handle_sync({"rooms": {
+            "join": {"!r:hs": {"timeline": {"events": [
+                {"type": "m.room.message", "sender": "@me:hs", "content": {"msgtype": "m.text", "body": "hey"}},
+                {"type": "m.room.message", "sender": "@bot:hs", "content": {"msgtype": "m.text", "body": "echo"}},
+                {"type": "m.room.message", "sender": "@me:hs", "content": {"msgtype": "m.image", "body": "x.png"}},
+            ]}}},
+            "invite": {
+                "!ok:hs": {"invite_state": {"events": [{"type": "m.room.member", "sender": "@me:hs", "content": {"membership": "invite"}}]}},
+                "!spam:hs": {"invite_state": {"events": [{"type": "m.room.member", "sender": "@x:hs", "content": {"membership": "invite"}}]}},
+            },
+        }})
+        self.assertEqual([(i.chat_id, i.text) for i in ch.hub.dispatched], [("!r:hs", "hey")])
+        joined = [p for m, p in calls if p.endswith("/join")]
+        self.assertEqual(len(joined), 1)
+        self.assertIn("%21ok%3Ahs", joined[0])  # only the owner's invite is accepted
+
+    def test_send_puts_message(self):
+        from smooth_agent.channels import MatrixChannel
+        ch = MatrixChannel(ChannelConfig("matrix", options={"token": "t"}), log=lambda m: None)
+        calls = []
+        ch._req = lambda method, path, payload=None, **k: calls.append((method, path, payload)) or {}
+        ch.send("!r:hs", "hello")
+        self.assertEqual(calls[0][0], "PUT")
+        self.assertIn("/rooms/%21r%3Ahs/send/m.room.message/", calls[0][1])
+        self.assertEqual(calls[0][2], {"msgtype": "m.text", "body": "hello"})
+
+
+class DeliveryWebhookTests(unittest.TestCase):
+    def test_discord_chunks_and_no_mentions(self):
+        from unittest import mock
+
+        from smooth_agent import channels as chmod
+        ch = chmod.DiscordChannel(ChannelConfig("discord", options={"webhook_url": "https://d/x"}), log=lambda m: None)
+        with mock.patch.object(chmod, "_post_json", return_value=(204, {})) as p:
+            ch.send("webhook", "y" * 4000)
+        self.assertEqual(p.call_count, 3)  # 1900 + 1900 + 200
+        url, payload = p.call_args_list[0][0]
+        self.assertEqual(url, "https://d/x")
+        self.assertEqual(payload["allowed_mentions"], {"parse": []})
+
+
+class SetupHelperTests(unittest.TestCase):
+    def test_strip_channels_table(self):
+        import tomllib
+
+        from smooth_agent.cli import _strip_channels_table
+        src = ('default = "m"\n[agent]\nx = 1\n[channels]\nenabled = []\n# [channels.telegram]\n'
+               '[channels.slack]\nowners = []\n[mcp]\nconfirm = false\n')
+        out = _strip_channels_table(src) + '\n[channels]\nenabled = ["telegram"]\n'
+        cfg = tomllib.loads(out)  # would raise on a duplicate [channels] table
+        self.assertEqual(cfg["channels"], {"enabled": ["telegram"]})
+        self.assertEqual(cfg["mcp"], {"confirm": False})
+        self.assertEqual(cfg["agent"], {"x": 1})
+
+    def test_example_config_parses_with_all_channels(self):
+        import tomllib
+        from pathlib import Path
+        from smooth_agent.channels import CHANNEL_TYPES
+        ex = (Path(__file__).resolve().parents[1] / "smooth_agent" / "data" / "config.example.toml").read_text()
+        tomllib.loads(ex)
+        for name in CHANNEL_TYPES:
+            self.assertIn(f"[channels.{name}]", ex, f"example config should document {name}")
 
 
 if __name__ == "__main__":

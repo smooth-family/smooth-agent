@@ -79,6 +79,24 @@ webhook_port = 8808    # inbound webhook server (WhatsApp); expose it with a rev
 # webhook_url_env = "WECHAT_ROBOT_URL"
 # owners = ["robot"]
 
+# [channels.slack]                   # Slack app: Event Subscriptions -> <host>/webhook/slack (message.im)
+# token_env = "SLACK_BOT_TOKEN"      # xoxb-...
+# signing_secret_env = "SLACK_SIGNING_SECRET"
+# owners = ["U0123ABCD"]             # your Slack user id
+
+# [channels.matrix]                  # any homeserver; invite the bot to a room and it joins
+# homeserver = "https://matrix.org"
+# token_env = "MATRIX_TOKEN"         # the bot account's access token
+# owners = ["@you:matrix.org"]
+
+# [channels.line]                    # LINE Messaging API: webhook -> <host>/webhook/line
+# token_env = "LINE_CHANNEL_TOKEN"   # channel access token
+# secret_env = "LINE_CHANNEL_SECRET"
+# owners = ["U1234567890abcdef"]     # your LINE user id
+
+# [channels.discord]                 # channel webhook, for delivery / alerts
+# webhook_url_env = "DISCORD_WEBHOOK_URL"
+
 [mcp]
 confirm = false        # ask before every MCP tool call
 # [mcp.servers.github]

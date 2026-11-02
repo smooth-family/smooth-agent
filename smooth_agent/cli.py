@@ -247,15 +247,29 @@ def _cmd_setup(args) -> int:
     return 0
 
 
+def _strip_channels_table(text: str) -> str:
+    """Remove an existing [channels] table and its [channels.*] sub-tables (live
+    ones; commented lines are left alone) so a fresh one can be appended
+    without a duplicate-table TOML error."""
+    out, skipping = [], False
+    for line in text.splitlines(keepends=True):
+        s = line.strip()
+        if s.startswith("[") and not s.startswith("[["):
+            skipping = s == "[channels]" or s.startswith("[channels.")
+        if not skipping:
+            out.append(line)
+    return "".join(out)
+
+
 def _setup_channels(home: Path, cfg_path: Path) -> None:
     """Optional: pick chat channels and wire the first one (interactive only)."""
-    if "[channels]" in cfg_path.read_text(encoding="utf-8") and "enabled = [" in cfg_path.read_text(encoding="utf-8"):
-        # the example already carries a commented template; only add if the owner wants it now
-        pass
-    pick = _ask("chat channels to enable (comma-separated, blank to skip)", "", choices=None)
-    names = [n.strip().lower() for n in pick.split(",") if n.strip() in ("telegram", "whatsapp", "wechat")]
+    from .channels import CHANNEL_TYPES
+    print(f"chat channels available: {', '.join(CHANNEL_TYPES)}")
+    pick = _ask("channels to enable (comma-separated, blank to skip)", "", choices=None)
+    names = [n.strip().lower() for n in pick.split(",") if n.strip().lower() in CHANNEL_TYPES]
     if not names:
         return
+    cfg_path.write_text(_strip_channels_table(cfg_path.read_text(encoding="utf-8")), encoding="utf-8")
     blocks = [f'\n[channels]\nenabled = {json.dumps(names)}\nwebhook_host = "0.0.0.0"\nwebhook_port = 8808\n']
     if "telegram" in names:
         token = _ask("TELEGRAM_BOT_TOKEN (from @BotFather)", "", secret=True)
@@ -268,6 +282,14 @@ def _setup_channels(home: Path, cfg_path: Path) -> None:
         blocks.append('\n[channels.whatsapp]\ntoken_env = "WHATSAPP_TOKEN"\nphone_id = ""\nverify_token = ""\nowners = []\n')
     if "wechat" in names:
         blocks.append('\n[channels.wechat]\nwebhook_url_env = "WECHAT_ROBOT_URL"\nowners = ["robot"]\n')
+    if "slack" in names:
+        blocks.append('\n[channels.slack]\ntoken_env = "SLACK_BOT_TOKEN"\nsigning_secret_env = "SLACK_SIGNING_SECRET"\nowners = []\n')
+    if "matrix" in names:
+        blocks.append('\n[channels.matrix]\nhomeserver = "https://matrix.org"\ntoken_env = "MATRIX_TOKEN"\nowners = []\n')
+    if "line" in names:
+        blocks.append('\n[channels.line]\ntoken_env = "LINE_CHANNEL_TOKEN"\nsecret_env = "LINE_CHANNEL_SECRET"\nowners = []\n')
+    if "discord" in names:
+        blocks.append('\n[channels.discord]\nwebhook_url_env = "DISCORD_WEBHOOK_URL"\n')
     with open(cfg_path, "a", encoding="utf-8") as fh:
         fh.write("".join(blocks))
     print(f"added [channels] for {', '.join(names)} to {cfg_path}")
@@ -769,8 +791,13 @@ def _start_channels(args, home, log):
     hub = ChannelHub(channels, lambda sid, ch, chat: build_chat_agent(rt, sid, ch, chat), log=log,
                      webhook_host=chcfg.webhook_host, webhook_port=chcfg.webhook_port)
     hub_ref["hub"] = hub
-    add_send_message_tool(rt.registry, hub)
     hub.start()
+    if not hub.channels:  # every channel failed to start: run schedules only
+        hub.stop()
+        rt.close()
+        log("channels: none started; running scheduled jobs only")
+        return None, None
+    add_send_message_tool(rt.registry, hub)  # after start, so it lists only the live channels
     return hub, rt
 
 
