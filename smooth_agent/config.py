@@ -114,4 +114,49 @@ def load_settings(path: str | os.PathLike[str] | None = None) -> Settings:
     return Settings.from_config(load_config(path))
 
 
-__all__ = ["load_config", "find_config", "build_router", "load_settings", "Settings", "DEFAULT_PATHS"]
+@dataclass
+class ChannelsConfig:
+    """[channels] from smooth-agent.toml: which chat channels to run and where
+    the inbound-webhook server listens."""
+
+    enabled: list[str] = field(default_factory=list)
+    webhook_host: str = "0.0.0.0"
+    webhook_port: int = 8808
+    specs: list[Any] = field(default_factory=list)  # list[channels.ChannelConfig], built lazily
+
+    @property
+    def any(self) -> bool:
+        return bool(self.specs)
+
+
+def load_channels(cfg: dict[str, Any], *, env: dict[str, str] | None = None) -> ChannelsConfig:
+    """Turn the [channels.*] tables into ChannelConfig objects, resolving any
+    `<key>_env = "VAR"` into `<key>` from the environment (so secrets stay in
+    the environment, never the config file)."""
+    from .channels import CHANNEL_TYPES, ChannelConfig
+    env = env if env is not None else dict(os.environ)
+    section = cfg.get("channels") or {}
+    enabled = [str(x) for x in (section.get("enabled") or [])]
+    out = ChannelsConfig(enabled=enabled, webhook_host=str(section.get("webhook_host", "0.0.0.0")),
+                         webhook_port=int(section.get("webhook_port", 8808)))
+    default_token_env = {"telegram": "TELEGRAM_BOT_TOKEN", "whatsapp": "WHATSAPP_TOKEN"}
+    for name in enabled:
+        if name not in CHANNEL_TYPES:
+            continue
+        sect = dict(section.get(name) or {})
+        owners = [str(o) for o in (sect.pop("owners", []) or [])]
+        auto_approve = bool(sect.pop("auto_approve", False))
+        options: dict[str, Any] = {}
+        for k, v in sect.items():
+            if k.endswith("_env"):
+                options[k[:-4]] = env.get(str(v), "")
+            else:
+                options[k] = v
+        if name in default_token_env and not options.get("token"):
+            options["token"] = env.get(default_token_env[name], "")
+        out.specs.append(ChannelConfig(name=name, owners=owners, auto_approve=auto_approve, options=options))
+    return out
+
+
+__all__ = ["load_config", "find_config", "build_router", "load_settings", "Settings", "ChannelsConfig",
+           "load_channels", "DEFAULT_PATHS"]

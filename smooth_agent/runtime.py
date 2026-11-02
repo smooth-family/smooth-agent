@@ -31,6 +31,7 @@ class Runtime:
     home: Path
     store: Any = None
     memory: Any = None
+    processes: Any = None
     warnings: list[str] = field(default_factory=list)
     _closers: list[Callable[[], None]] = field(default_factory=list)
 
@@ -136,7 +137,24 @@ def build_runtime(config_path: str | None = None, *, approver: Approver | None =
     if st.memory:
         rt_ref["agent"] = agent
     return Runtime(agent=agent, router=router, registry=reg, workspace=ws, settings=st, config=cfg, home=home,
-                   store=store, memory=mem, warnings=warnings, _closers=closers)
+                   store=store, memory=mem, processes=pm, warnings=warnings, _closers=closers)
+
+
+def build_chat_agent(rt: Runtime, session_id: str, channel: str = "cli", chat_id: str = "") -> Agent:
+    """A fresh Agent for one chat, sharing the runtime's router, tools, skills,
+    store and memory but with its own saved session. Used by the channel hub so
+    each conversation keeps its own history across restarts."""
+    reg = rt.registry.copy()  # its own copy so delegate/skill closures bind to this agent
+    st = rt.settings
+    agent = Agent(rt.router, reg, system=rt.agent.system, max_steps=st.max_steps, max_tokens=st.max_tokens,
+                  skills=rt.agent.skills, delegate=st.delegate, delegate_steps=st.delegate_steps,
+                  processes=rt.processes, store=rt.store, memory=rt.memory, session_id=session_id,
+                  context_tokens=st.context_tokens, keep_recent=st.keep_recent)
+    if rt.store is not None:
+        rt.store.new_session(session_id, channel=channel, meta={"chat_id": chat_id} if chat_id else None)
+        if rt.store.session_messages(session_id):
+            agent.resume(session_id)  # continue where this chat left off
+    return agent
 
 
 def _clock(tz_name: str) -> str:
@@ -151,4 +169,4 @@ def _clock(tz_name: str) -> str:
     return f"\n\nToday is {now:%A %Y-%m-%d}; the owner's timezone is {tz_name or now.strftime('%Z') or 'local'} (UTC{now:%z})."
 
 
-__all__ = ["Runtime", "build_runtime", "find_config"]
+__all__ = ["Runtime", "build_runtime", "build_chat_agent", "find_config"]

@@ -241,8 +241,37 @@ def _cmd_setup(args) -> int:
             else:
                 print(f"set it later: smooth-agent setup --key ... or add {key_env}=... to {home / '.env'}")
     (home / "skills").mkdir(exist_ok=True)
+    if sys.stdin.isatty() and not getattr(args, "no_channels", False):
+        _setup_channels(home, cfg_path)
     print("\nnext: smooth-agent doctor   then   smooth-agent run")
     return 0
+
+
+def _setup_channels(home: Path, cfg_path: Path) -> None:
+    """Optional: pick chat channels and wire the first one (interactive only)."""
+    if "[channels]" in cfg_path.read_text(encoding="utf-8") and "enabled = [" in cfg_path.read_text(encoding="utf-8"):
+        # the example already carries a commented template; only add if the owner wants it now
+        pass
+    pick = _ask("chat channels to enable (comma-separated, blank to skip)", "", choices=None)
+    names = [n.strip().lower() for n in pick.split(",") if n.strip() in ("telegram", "whatsapp", "wechat")]
+    if not names:
+        return
+    blocks = [f'\n[channels]\nenabled = {json.dumps(names)}\nwebhook_host = "0.0.0.0"\nwebhook_port = 8808\n']
+    if "telegram" in names:
+        token = _ask("TELEGRAM_BOT_TOKEN (from @BotFather)", "", secret=True)
+        if token:
+            set_env_value("TELEGRAM_BOT_TOKEN", token)
+        owner = _ask("your Telegram numeric id (message the bot once if unsure)", "")
+        owners = f'["{owner}"]' if owner else "[]"
+        blocks.append(f'\n[channels.telegram]\ntoken_env = "TELEGRAM_BOT_TOKEN"\nowners = {owners}\nauto_approve = false\n')
+    if "whatsapp" in names:
+        blocks.append('\n[channels.whatsapp]\ntoken_env = "WHATSAPP_TOKEN"\nphone_id = ""\nverify_token = ""\nowners = []\n')
+    if "wechat" in names:
+        blocks.append('\n[channels.wechat]\nwebhook_url_env = "WECHAT_ROBOT_URL"\nowners = ["robot"]\n')
+    with open(cfg_path, "a", encoding="utf-8") as fh:
+        fh.write("".join(blocks))
+    print(f"added [channels] for {', '.join(names)} to {cfg_path}")
+    print("fill any blanks, then: smooth-agent daemon")
 
 
 def _ask(label: str, default: str, *, choices: list[str] | None = None, secret: bool = False) -> str:
@@ -301,6 +330,14 @@ def _cmd_doctor(args) -> int:
     print(f"ok  skills      {len(lib.available())} available here; {len(lib.hidden_optional)} optional off")
     if missing:
         print(f"    some skills want: {', '.join(missing[:20])}")
+    from .config import load_channels
+    chcfg = load_channels(cfg)
+    if chcfg.specs:
+        for s in chcfg.specs:
+            has = bool(s.options.get("token") or s.options.get("webhook_url"))
+            print(f"{ok(has and bool(s.owners))} channel     {s.name} — owners {len(s.owners)}, credential {'set' if has else 'MISSING'}")
+    else:
+        print("--  channels    none enabled ([channels] enabled = [...])")
     from .mcp import load_servers
     servers = load_servers(cfg, home)
     print(f"{ok(bool(servers))} mcp         {', '.join(servers) or 'no servers (smooth-agent mcp add …)'}")
@@ -672,13 +709,147 @@ def _cmd_daemon(args) -> int:
     lock = DaemonLock(home)
     if not lock.acquire():
         return _err(f"a daemon is already running for {home}")
+    log = lambda m: print(f"{_when(_t.time())} {m}", flush=True)  # noqa: E731
+
+    # chat channels (optional): one shared runtime, one agent session per chat
+    hub = rt = None
+    deliver = []
+    if not getattr(args, "no_channels", False):
+        hub, rt = _start_channels(args, home, log)
+        if hub:
+            deliver = [hub.deliver_hook()]
+
     sched = Scheduler(_store(), home, lambda prompt, cr: _run_job(args, prompt, cr), tz=_tz(args),
-                      log=lambda m: print(f"{_when(_t.time())} {m}", flush=True))
+                      deliver=deliver, log=log)
     signal.signal(signal.SIGTERM, lambda *_: sched.stop())
     signal.signal(signal.SIGINT, lambda *_: sched.stop())
-    print(f"smooth-agent daemon {__version__} — home {home}; checking schedules every {args.interval:g}s", flush=True)
-    sched.loop(interval=args.interval, once=args.once)
+    where = "channels + schedules" if hub else "schedules"
+    print(f"smooth-agent daemon {__version__} — home {home}; running {where}, checking every {args.interval:g}s", flush=True)
+    try:
+        sched.loop(interval=args.interval, once=args.once)
+    finally:
+        if hub:
+            hub.stop()
+        if rt:
+            rt.close()
     print("daemon stopped", flush=True)
+    return 0
+
+
+def _start_channels(args, home, log):
+    """Build the channel hub on a shared runtime. Returns (hub, runtime) or (None, None)."""
+    from .channels import ChannelHub, add_send_message_tool, build_channels
+    from .config import load_channels
+    from .runtime import build_chat_agent, build_runtime
+    try:
+        cfg = load_config(args.config)
+    except FileNotFoundError:
+        return None, None
+    chcfg = load_channels(cfg)
+    if not chcfg.specs:
+        return None, None
+
+    hub_ref: dict = {}
+
+    def approve(name: str, a: dict) -> bool:
+        h = hub_ref.get("hub")
+        return bool(h and h.approve(name, a))
+
+    try:
+        rt = build_runtime(args.config, approver=approve, ask=None, channel="channel")
+    except RouterError as e:
+        log(f"channels: not started ({e})")
+        return None, None
+    for w in rt.warnings:
+        log(f"  ! {w}")
+    channels = build_channels(chcfg.specs, log=log)
+    if not channels:
+        rt.close()
+        return None, None
+    hub = ChannelHub(channels, lambda sid, ch, chat: build_chat_agent(rt, sid, ch, chat), log=log,
+                     webhook_host=chcfg.webhook_host, webhook_port=chcfg.webhook_port)
+    hub_ref["hub"] = hub
+    add_send_message_tool(rt.registry, hub)
+    hub.start()
+    return hub, rt
+
+
+# ---------- channels ----------
+
+def _cmd_channels(args) -> int:
+    from .channels import build_channels
+    from .config import load_channels
+    load_dotenv(ensure_home() / ".env")
+    try:
+        cfg = load_config(args.config)
+    except FileNotFoundError as e:
+        return _err(str(e))
+    chcfg = load_channels(cfg)
+    action = args.action or "list"
+    if action == "list":
+        if not chcfg.specs:
+            print("no channels enabled. add one under [channels] in your config, e.g.:\n"
+                  '  enabled = ["telegram"]\n  [channels.telegram]\n  token_env = "TELEGRAM_BOT_TOKEN"\n  owners = ["<your id>"]')
+            return 0
+        for s in chcfg.specs:
+            tok = s.options.get("token") or s.options.get("webhook_url") or ""
+            key = "set" if tok else "MISSING"
+            print(f"{s.name:<10} owners={', '.join(s.owners) or 'NONE':<20} credential={key:<8} "
+                  f"auto_approve={'yes' if s.auto_approve else 'no'}")
+        print(f"\nwebhook server: {chcfg.webhook_host}:{chcfg.webhook_port}")
+        print("start them with: smooth-agent daemon")
+        return 0
+    if action == "test":
+        if not args.rest:
+            return _err('usage: smooth-agent channels test <name> [chat_id] "<message>"')
+        name = args.rest[0]
+        spec = next((s for s in chcfg.specs if s.name == name), None)
+        if not spec:
+            return _err(f"channel '{name}' is not enabled in the config")
+        rest = args.rest[1:]
+        chat_id = rest[0] if len(rest) > 1 else (spec.owners[0] if spec.owners else "")
+        text = " ".join(rest[1:]) if len(rest) > 1 else (rest[0] if rest else "Test message from Smooth Agent.")
+        if not chat_id:
+            return _err(f"no chat id: pass one or set owners for '{name}'")
+        ch = build_channels([spec])[0]
+        try:
+            ch.send(str(chat_id), text)
+        except Exception as e:
+            return _err(f"send failed: {e}")
+        print(f"sent to {name} ({chat_id})")
+        return 0
+    return _err("actions: list, test")
+
+
+# ---------- service ----------
+
+def _cmd_service(args) -> int:
+    home = ensure_home()
+    # the module form always runs THIS install, with no PATH ambiguity (e.g. a same-named script elsewhere)
+    exe = f"{sys.executable} -m smooth_agent.cli"
+    unit = (
+        "[Unit]\n"
+        "Description=Smooth Agent (channels + scheduled jobs)\n"
+        "After=network-online.target\nWants=network-online.target\n\n"
+        "[Service]\n"
+        "Type=simple\n"
+        f"ExecStart={exe} daemon\n"
+        f"Environment=SMOOTH_AGENT_HOME={home}\n"
+        "Restart=always\nRestartSec=5\n\n"
+        "[Install]\nWantedBy=default.target\n"
+    )
+    if not args.install:
+        print(unit)
+        print("# install (user service):")
+        print("#   smooth-agent service --install")
+        print("# then: systemctl --user daemon-reload && systemctl --user enable --now smooth-agent")
+        return 0
+    dest = Path.home() / ".config" / "systemd" / "user" / "smooth-agent.service"
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    dest.write_text(unit, encoding="utf-8")
+    print(f"wrote {dest}")
+    print("enable it with:\n  systemctl --user daemon-reload\n  systemctl --user enable --now smooth-agent\n"
+          "  journalctl --user -u smooth-agent -f   # logs")
     return 0
 
 
@@ -760,10 +931,20 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--limit", type=int, default=30)
     sp.set_defaults(func=_cmd_jobs)
 
-    sp = sub.add_parser("daemon", help="run scheduled jobs (keep it running, or install it as a service)")
+    sp = sub.add_parser("daemon", help="run chat channels + scheduled jobs (keep it running, or install as a service)")
     sp.add_argument("--interval", type=float, default=15.0, help="seconds between schedule checks")
     sp.add_argument("--once", action="store_true", help="check once, run what is due, then exit")
+    sp.add_argument("--no-channels", action="store_true", help="run only scheduled jobs, not chat channels")
     sp.set_defaults(func=_cmd_daemon)
+
+    sp = sub.add_parser("channels", help="chat channels: list configured ones / send a test message")
+    sp.add_argument("action", nargs="?", choices=["list", "test"], default="list")
+    sp.add_argument("rest", nargs="*", help='test: <name> [chat_id] "<message>"')
+    sp.set_defaults(func=_cmd_channels)
+
+    sp = sub.add_parser("service", help="print (or install) a systemd user service for the daemon")
+    sp.add_argument("--install", action="store_true", help="write the unit to ~/.config/systemd/user/")
+    sp.set_defaults(func=_cmd_service)
 
     sp = sub.add_parser("skills", help="list / search / install / remove skills")
     sp.add_argument("action", nargs="?", choices=["list", "search", "install", "remove"], default="list")

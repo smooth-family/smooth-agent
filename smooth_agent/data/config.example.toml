@@ -57,6 +57,28 @@ headless = true
 # model = "gpt-4o-mini-tts"
 # voice = "alloy"
 
+[channels]
+# Talk to the agent from chat apps. `smooth-agent daemon` runs these plus your cron jobs.
+# Only ids on a channel's `owners` list are answered. Message the bot once and it replies with your id.
+enabled = []           # e.g. ["telegram"]
+webhook_host = "0.0.0.0"
+webhook_port = 8808    # inbound webhook server (WhatsApp); expose it with a reverse proxy
+
+# [channels.telegram]
+# token_env = "TELEGRAM_BOT_TOKEN"   # bot token from @BotFather, kept in .env
+# owners = ["123456789"]             # your numeric Telegram id
+# auto_approve = false               # approve the owner's tool calls without a button tap
+
+# [channels.whatsapp]                # Meta WhatsApp Cloud API; point the webhook at <host>/webhook/whatsapp
+# token_env = "WHATSAPP_TOKEN"
+# phone_id = "123456789012345"
+# verify_token = "a-secret-you-choose"
+# owners = ["628123456789"]
+
+# [channels.wechat]                  # WeChat Work group robot, for delivery / alerts
+# webhook_url_env = "WECHAT_ROBOT_URL"
+# owners = ["robot"]
+
 [mcp]
 confirm = false        # ask before every MCP tool call
 # [mcp.servers.github]
