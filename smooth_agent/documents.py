@@ -640,3 +640,224 @@ def _unar_file_indices(path: Path, pw: str) -> list[int] | None:
 
 __all__ = ["Extracted", "DocumentError", "extract_text", "list_archive", "extract_archive", "kind_of",
            "image_size", "render_pdf", "DOC_EXT", "IMAGE_EXT", "ARCHIVE_EXT"]
+
+
+# ---------------------------------------------------------------- writing Word and Excel (stdlib)
+
+def _x(text: str) -> str:
+    from xml.sax.saxutils import escape
+    import re as _re
+    return escape(_re.sub(r"[\x00-\x08\x0b\x0c\x0e-\x1f]", "", str(text)))
+
+
+_CT_DOCX = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
+<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>
+<Default Extension="xml" ContentType="application/xml"/>
+<Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/>
+<Override PartName="/word/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.styles+xml"/>
+</Types>"""
+_RELS_DOCX = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/>
+</Relationships>"""
+_DOC_RELS = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/>
+</Relationships>"""
+_STYLES_DOCX = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+<w:docDefaults><w:rPrDefault><w:rPr><w:rFonts w:ascii="Calibri" w:hAnsi="Calibri" w:cs="Calibri"/><w:sz w:val="22"/></w:rPr></w:rPrDefault>
+<w:pPrDefault><w:pPr><w:spacing w:after="120" w:line="276" w:lineRule="auto"/></w:pPr></w:pPrDefault></w:docDefaults>
+<w:style w:type="paragraph" w:default="1" w:styleId="Normal"><w:name w:val="Normal"/></w:style>
+<w:style w:type="paragraph" w:styleId="Title"><w:name w:val="Title"/><w:basedOn w:val="Normal"/><w:pPr><w:spacing w:after="240"/></w:pPr><w:rPr><w:b/><w:sz w:val="40"/></w:rPr></w:style>
+<w:style w:type="paragraph" w:styleId="Heading1"><w:name w:val="heading 1"/><w:basedOn w:val="Normal"/><w:pPr><w:keepNext/><w:spacing w:before="240" w:after="120"/><w:outlineLvl w:val="0"/></w:pPr><w:rPr><w:b/><w:sz w:val="32"/></w:rPr></w:style>
+<w:style w:type="paragraph" w:styleId="Heading2"><w:name w:val="heading 2"/><w:basedOn w:val="Normal"/><w:pPr><w:keepNext/><w:spacing w:before="200" w:after="80"/><w:outlineLvl w:val="1"/></w:pPr><w:rPr><w:b/><w:sz w:val="28"/></w:rPr></w:style>
+<w:style w:type="paragraph" w:styleId="Heading3"><w:name w:val="heading 3"/><w:basedOn w:val="Normal"/><w:pPr><w:keepNext/><w:spacing w:before="160" w:after="60"/><w:outlineLvl w:val="2"/></w:pPr><w:rPr><w:b/><w:sz w:val="24"/></w:rPr></w:style>
+<w:style w:type="table" w:styleId="TableGrid"><w:name w:val="Table Grid"/><w:tblPr><w:tblBorders>
+<w:top w:val="single" w:sz="4" w:space="0" w:color="999999"/><w:left w:val="single" w:sz="4" w:space="0" w:color="999999"/>
+<w:bottom w:val="single" w:sz="4" w:space="0" w:color="999999"/><w:right w:val="single" w:sz="4" w:space="0" w:color="999999"/>
+<w:insideH w:val="single" w:sz="4" w:space="0" w:color="999999"/><w:insideV w:val="single" w:sz="4" w:space="0" w:color="999999"/>
+</w:tblBorders><w:tblCellMar><w:left w:w="80" w:type="dxa"/><w:right w:w="80" w:type="dxa"/></w:tblCellMar></w:tblPr></w:style>
+</w:styles>"""
+
+
+def _runs(text: str, *, bold: bool = False, mono: bool = False) -> str:
+    """Inline Markdown (**bold**, `code`, [label](url)) -> Word runs."""
+    import re as _re
+    text = _re.sub(r"\[([^\]]+)\]\((https?://[^)\s]+)\)", r"\1 (\2)", text)
+    out = []
+    for i, part in enumerate(_re.split(r"(\*\*[^*]+\*\*|`[^`]+`)", text)):
+        if not part:
+            continue
+        b, m = bold, mono
+        if part.startswith("**") and part.endswith("**") and len(part) > 4:
+            part, b = part[2:-2], True
+        elif part.startswith("`") and part.endswith("`") and len(part) > 2:
+            part, m = part[1:-1], True
+        props = ("<w:b/>" if b else "") + ('<w:rFonts w:ascii="Consolas" w:hAnsi="Consolas"/>' if m else "")
+        out.append(f'<w:r>{"<w:rPr>" + props + "</w:rPr>" if props else ""}<w:t xml:space="preserve">{_x(part)}</w:t></w:r>')
+    return "".join(out)
+
+
+def _para(text: str, style: str = "", indent: int = 0, mono: bool = False) -> str:
+    ppr = (f'<w:pStyle w:val="{style}"/>' if style else "") + (f'<w:ind w:left="{indent}" w:hanging="240"/>' if indent else "")
+    if mono:
+        ppr += '<w:spacing w:after="0"/>'
+    return f'<w:p>{"<w:pPr>" + ppr + "</w:pPr>" if ppr else ""}{_runs(text, mono=mono)}</w:p>'
+
+
+def _table(rows: list[list[str]]) -> str:
+    cols = max(len(r) for r in rows)
+    grid = "".join('<w:gridCol w:w="%d"/>' % (9000 // cols) for _ in range(cols))
+    body = []
+    for i, row in enumerate(rows):
+        cells = "".join(f'<w:tc><w:tcPr><w:tcW w:w="{9000 // cols}" w:type="dxa"/></w:tcPr>'
+                        f'<w:p><w:pPr><w:spacing w:after="0"/></w:pPr>{_runs(c, bold=i == 0)}</w:p></w:tc>'
+                        for c in row + [""] * (cols - len(row)))
+        body.append(f"<w:tr>{cells}</w:tr>")
+    return (f'<w:tbl><w:tblPr><w:tblStyle w:val="TableGrid"/><w:tblW w:w="0" w:type="auto"/></w:tblPr>'
+            f"<w:tblGrid>{grid}</w:tblGrid>{''.join(body)}</w:tbl><w:p/>")
+
+
+def write_docx(path: Path, markdown: str) -> Path:
+    """Markdown -> a real .docx: # headings, paragraphs, **bold**, `code`, - bullets, 1. lists, | tables |, ``` code."""
+    import re as _re
+    lines = str(markdown).replace("\r\n", "\n").split("\n")
+    body, i = [], 0
+    while i < len(lines):
+        ln = lines[i]
+        s = ln.strip()
+        if s.startswith("```"):
+            i += 1
+            while i < len(lines) and not lines[i].strip().startswith("```"):
+                body.append(_para(lines[i] or " ", mono=True))
+                i += 1
+            body.append("<w:p/>")
+        elif s.startswith("|"):
+            rows = []
+            while i < len(lines) and lines[i].strip().startswith("|"):
+                cells = [c.strip() for c in lines[i].strip().strip("|").split("|")]
+                if not all(_re.fullmatch(r":?-{2,}:?", c) for c in cells if c):
+                    rows.append(cells)
+                i += 1
+            if rows:
+                body.append(_table(rows))
+            continue
+        elif _re.match(r"#{1,6}\s", s):
+            level = len(s) - len(s.lstrip("#"))
+            body.append(_para(s.lstrip("#").strip(), "Title" if level == 1 and not body else f"Heading{min(level, 3)}"))
+        elif _re.match(r"[-*+]\s", s):
+            body.append(_para("•\t" + s[2:].strip(), indent=360 * (1 + (len(ln) - len(ln.lstrip())) // 2)))
+        elif _re.match(r"\d+[.)]\s", s):
+            body.append(_para(s, indent=360))
+        elif s:
+            body.append(_para(s))
+        i += 1
+    doc = ('<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+           '<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body>'
+           + "".join(body) +
+           '<w:sectPr><w:pgSz w:w="11906" w:h="16838"/><w:pgMar w:top="1134" w:right="1134" w:bottom="1134" '
+           'w:left="1134" w:header="567" w:footer="567" w:gutter="0"/></w:sectPr></w:body></w:document>')
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as z:
+        z.writestr("[Content_Types].xml", _CT_DOCX)
+        z.writestr("_rels/.rels", _RELS_DOCX)
+        z.writestr("word/_rels/document.xml.rels", _DOC_RELS)
+        z.writestr("word/styles.xml", _STYLES_DOCX)
+        z.writestr("word/document.xml", doc)
+    return path
+
+
+_NUM = re.compile(r"-?(0|[1-9]\d{0,14})(\.\d+)?")
+
+
+def _cell_ref(col: int, row: int) -> str:
+    letters = ""
+    col += 1
+    while col:
+        col, rem = divmod(col - 1, 26)
+        letters = chr(65 + rem) + letters
+    return f"{letters}{row}"
+
+
+def write_xlsx(path: Path, sheets: dict[str, list[list]]) -> Path:
+    """{sheet name: rows} -> a real .xlsx. The first row of each sheet is a bold, frozen header; numbers
+    become numbers (but '0812…', '00123' and long digit strings stay text so nothing is lost)."""
+    names, used = [], set()
+    for name in sheets or {"Sheet1": []}:
+        clean = re.sub(r"[\[\]:*?/\\]", "_", str(name)).strip("'")[:31] or "Sheet"
+        base, n = clean, 2
+        while clean.lower() in used:
+            clean = f"{base[:28]}~{n}"
+            n += 1
+        used.add(clean.lower())
+        names.append(clean)
+    rows_list = list((sheets or {"Sheet1": []}).values())
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as z:
+        z.writestr("[Content_Types].xml",
+                   '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+                   '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">'
+                   '<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>'
+                   '<Default Extension="xml" ContentType="application/xml"/>'
+                   '<Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>'
+                   '<Override PartName="/xl/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml"/>'
+                   + "".join(f'<Override PartName="/xl/worksheets/sheet{i}.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>'
+                             for i in range(1, len(names) + 1)) + "</Types>")
+        z.writestr("_rels/.rels", '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+                   '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+                   '<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/>'
+                   "</Relationships>")
+        z.writestr("xl/workbook.xml", '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+                   '<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" '
+                   'xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets>'
+                   + "".join(f'<sheet name="{_x(n)}" sheetId="{i}" r:id="rId{i}"/>' for i, n in enumerate(names, 1))
+                   + "</sheets></workbook>")
+        z.writestr("xl/_rels/workbook.xml.rels", '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+                   '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+                   + "".join(f'<Relationship Id="rId{i}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" '
+                             f'Target="worksheets/sheet{i}.xml"/>' for i in range(1, len(names) + 1))
+                   + f'<Relationship Id="rId{len(names) + 1}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/>'
+                   "</Relationships>")
+        z.writestr("xl/styles.xml", '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+                   '<styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">'
+                   '<fonts count="2"><font><sz val="11"/><name val="Calibri"/></font><font><b/><sz val="11"/><name val="Calibri"/></font></fonts>'
+                   '<fills count="2"><fill><patternFill patternType="none"/></fill><fill><patternFill patternType="gray125"/></fill></fills>'
+                   '<borders count="1"><border><left/><right/><top/><bottom/><diagonal/></border></borders>'
+                   '<cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellStyleXfs>'
+                   '<cellXfs count="2"><xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0"/>'
+                   '<xf numFmtId="0" fontId="1" fillId="0" borderId="0" xfId="0" applyFont="1"/></cellXfs>'
+                   '<cellStyles count="1"><cellStyle name="Normal" xfId="0" builtinId="0"/></cellStyles>'
+                   "</styleSheet>")
+        for i, rows in enumerate(rows_list, 1):
+            rows = [list(r) if isinstance(r, (list, tuple)) else [r] for r in (rows or [])]
+            widths: dict[int, int] = {}
+            xml_rows = []
+            for r, row in enumerate(rows, 1):
+                cells = []
+                for c, val in enumerate(row):
+                    if val is None or val == "":
+                        continue
+                    ref, style = _cell_ref(c, r), ' s="1"' if r == 1 and len(rows) > 1 else ""
+                    widths[c] = max(widths.get(c, 0), min(60, len(str(val))))
+                    if isinstance(val, bool):
+                        cells.append(f'<c r="{ref}" t="b"{style}><v>{int(val)}</v></c>')
+                    elif isinstance(val, (int, float)) or (isinstance(val, str) and _NUM.fullmatch(val.strip())
+                                                           and not (val.strip().startswith(("0", "-0")) and len(val.strip().lstrip("-")) > 1
+                                                                    and not val.strip().lstrip("-").startswith("0."))):
+                        cells.append(f'<c r="{ref}"{style}><v>{str(val).strip()}</v></c>')
+                    else:
+                        cells.append(f'<c r="{ref}" t="inlineStr"{style}><is><t xml:space="preserve">{_x(val)}</t></is></c>')
+                xml_rows.append(f'<row r="{r}">{"".join(cells)}</row>')
+            cols = "".join(f'<col min="{c + 1}" max="{c + 1}" width="{max(8, w + 2)}" customWidth="1"/>'
+                           for c, w in sorted(widths.items()))
+            freeze = ('<sheetViews><sheetView workbookViewId="0"><pane ySplit="1" topLeftCell="A2" activePane="bottomLeft" '
+                      'state="frozen"/></sheetView></sheetViews>') if len(rows) > 1 else ""
+            z.writestr(f"xl/worksheets/sheet{i}.xml", '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+                       '<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">' + freeze
+                       + (f"<cols>{cols}</cols>" if cols else "") + f"<sheetData>{''.join(xml_rows)}</sheetData></worksheet>")
+    return path
+
+
+__all__ += ["write_docx", "write_xlsx"]

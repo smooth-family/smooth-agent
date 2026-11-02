@@ -306,3 +306,49 @@ class ToolTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class WriterTests(unittest.TestCase):
+    def setUp(self):
+        self.ws = Workspace(tmp())
+        self.reg = default_registry(self.ws, allow_http=False)
+
+    def test_docx_round_trip(self):
+        md = ("# Laporan\nPenjualan naik **12%** pakai `kode`.\n\n## Detail\n| Produk | Unit |\n|---|---|\n"
+              "| Kopi <&> | 340 |\n- satu\n1. dua\n```\nx = 1\n```")
+        out = self.reg.run("create_document", {"path": "r/laporan.docx", "content": md})
+        self.assertIn("created r/laporan.docx", out)
+        text = extract_text(self.ws.root / "r" / "laporan.docx").text
+        self.assertIn("Penjualan naik 12% pakai kode.", text)
+        self.assertIn("# Detail", text.replace("## Detail", "# Detail"))
+        self.assertIn("Produk | Unit\nKopi <&> | 340", text)
+        self.assertIn("•\tsatu", text)
+        self.assertIn("x = 1", text)
+        with zipfile.ZipFile(self.ws.root / "r" / "laporan.docx") as z:
+            self.assertIn("[Content_Types].xml", z.namelist())
+            self.assertIn('w:val="Title"', z.read("word/document.xml").decode())
+
+    def test_xlsx_types_and_names(self):
+        self.reg.run("create_document", {"path": "d.xlsx", "sheets": {
+            "Data": [["Nama", "Nilai", "HP", "Kode", "Lulus"], ["Budi", "90", "08123", "007", True], ["Ani", 85.5, "+62", "0.5", False]],
+            "a/b[c]": [["x"]]}})
+        with zipfile.ZipFile(self.ws.root / "d.xlsx") as z:
+            sheet = z.read("xl/worksheets/sheet1.xml").decode()
+            wb = z.read("xl/workbook.xml").decode()
+        self.assertIn('<c r="B2"><v>90</v></c>', sheet)                   # number
+        self.assertIn('<c r="C2" t="inlineStr"><is><t xml:space="preserve">08123</t>', sheet)  # phone stays text
+        self.assertIn('<c r="D2" t="inlineStr"><is><t xml:space="preserve">007</t>', sheet)    # leading zeros kept
+        self.assertIn('<c r="D3"><v>0.5</v></c>', sheet)
+        self.assertIn('<c r="E2" t="b"><v>1</v></c>', sheet)
+        self.assertIn('s="1"', sheet)                                      # bold header
+        self.assertIn('state="frozen"', sheet)
+        self.assertIn('name="a_b_c_"', wb)
+        text = extract_text(self.ws.root / "d.xlsx").text
+        self.assertIn("Budi\t90\t08123\t007\tTRUE", text)
+
+    def test_csv_to_xlsx_and_errors(self):
+        self.reg.run("create_document", {"path": "c.xlsx", "content": "a\tb\n1\t2\n"})
+        self.assertIn("a\tb\n1\t2", extract_text(self.ws.root / "c.xlsx").text)
+        self.assertIn("error", self.reg.run("create_document", {"path": "x.pdf", "content": "hi"}))
+        self.assertIn("error", self.reg.run("create_document", {"path": "y.docx", "content": " "}))
+        self.assertIn("outside the workspace", self.reg.run("create_document", {"path": "/tmp/z.docx", "content": "x"}))

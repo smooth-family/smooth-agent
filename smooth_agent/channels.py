@@ -183,6 +183,10 @@ class Channel:
     supports_buttons = False
     supports_progress = False  # post/edit/delete one live progress message
     supports_voice = False     # send_voice(chat_id, ogg_path)
+    supports_files = False     # send_file(chat_id, path, caption)
+
+    def send_file(self, chat_id: str, path: Path, caption: str = "") -> str:
+        raise RuntimeError(f"{self.kind}: sending files is not supported yet")
 
     def __init__(self, cfg: ChannelConfig, *, log: Callable[[str], None] = print):
         self.cfg = cfg
@@ -297,29 +301,57 @@ class TelegramChannel(Channel):
         self._api("deleteMessage", {"chat_id": chat_id, "message_id": int(message_id)}, timeout=15)
 
     supports_voice = True
+    supports_files = True
+    MAX_UPLOAD = 50 * 1024 * 1024  # bots may send files up to 50 MB
 
-    def send_voice(self, chat_id: str, ogg: Path, caption: str = "") -> None:
-        """Upload an OGG/Opus file as a voice note (multipart; the Bot API takes files up to 50 MB)."""
+    def _upload(self, method: str, field: str, path: Path, mime: str, fields: dict[str, str]) -> None:
+        """Multipart upload of one file to a Bot API method (sendVoice, sendPhoto, sendDocument, …)."""
         import uuid as _uuid
+        size = path.stat().st_size
+        if size > self.MAX_UPLOAD:
+            raise RuntimeError(f"{path.name} is {size / 1e6:.0f} MB; Telegram bots can send files up to 50 MB")
         boundary = _uuid.uuid4().hex
-        parts = [("chat_id", str(chat_id))] + ([("caption", caption[:1000])] if caption else [])
         body = b"".join(f'--{boundary}\r\nContent-Disposition: form-data; name="{k}"\r\n\r\n{v}\r\n'.encode()
-                        for k, v in parts)
-        body += (f'--{boundary}\r\nContent-Disposition: form-data; name="voice"; filename="{ogg.name}"\r\n'
-                 "Content-Type: audio/ogg\r\n\r\n").encode() + ogg.read_bytes() + f"\r\n--{boundary}--\r\n".encode()
-        url = f"{TELEGRAM_API}/bot{self.token}/sendVoice"
+                        for k, v in fields.items() if v)
+        name = safe_filename(path.name).replace('"', "_")
+        body += (f'--{boundary}\r\nContent-Disposition: form-data; name="{field}"; filename="{name}"\r\n'
+                 f"Content-Type: {mime}\r\n\r\n").encode() + path.read_bytes() + f"\r\n--{boundary}--\r\n".encode()
+        url = f"{TELEGRAM_API}/bot{self.token}/{method}"
         for attempt in range(3):
             try:
                 _status, raw = _http("POST", url, headers={"content-type": f"multipart/form-data; boundary={boundary}"},
-                                     data=body, timeout=120)
+                                     data=body, timeout=300)
                 data = json.loads(raw or b"{}")
                 if not data.get("ok"):
-                    raise RuntimeError(f"telegram sendVoice: {data.get('description') or data}")
+                    raise RuntimeError(f"telegram {method}: {data.get('description') or data}")
                 return
             except (urllib.error.URLError, ConnectionError, TimeoutError, OSError):
                 if attempt == 2:
                     raise
                 time.sleep(1.0 + attempt)
+
+    def send_voice(self, chat_id: str, ogg: Path, caption: str = "") -> None:
+        """An OGG/Opus file as a voice note."""
+        self._upload("sendVoice", "voice", ogg, "audio/ogg", {"chat_id": str(chat_id), "caption": caption[:1000]})
+
+    def send_file(self, chat_id: str, path: Path, caption: str = "") -> str:
+        """Send a file the way Telegram shows it best: photo, voice note, audio, video or document."""
+        import mimetypes
+        ext = path.suffix.lower()
+        mime = mimetypes.guess_type(path.name)[0] or "application/octet-stream"
+        fields = {"chat_id": str(chat_id), "caption": caption[:1000]}
+        if ext in (".jpg", ".jpeg", ".png", ".webp") and path.stat().st_size <= 10 * 1024 * 1024:
+            method, field, how = "sendPhoto", "photo", "photo"
+        elif ext in (".ogg", ".oga", ".opus"):
+            method, field, how = "sendVoice", "voice", "voice note"
+        elif ext in (".mp3", ".m4a", ".flac", ".wav"):
+            method, field, how = "sendAudio", "audio", "audio"
+        elif ext == ".mp4":
+            method, field, how = "sendVideo", "video", "video"
+        else:
+            method, field, how = "sendDocument", "document", "document"
+        self._upload(method, field, path, mime, fields)
+        return how
 
     def typing(self, chat_id: str) -> None:
         try:
@@ -1435,6 +1467,44 @@ def add_send_message_tool(registry, hub: ChannelHub) -> None:
     )(lambda args: _send_message(hub, args))
 
 
+def add_send_file_tool(registry, hub: ChannelHub, workspace) -> None:
+    registry.tool(
+        "send_file",
+        "Send a file to the owner in the chat: a report, spreadsheet, document, image, audio or archive you made or "
+        "found. Images arrive as photos, .ogg as a voice note, mp3 as audio, mp4 as video, anything else as a "
+        "document (max 50 MB). Prefer this over pasting long content into the reply. Optional caption.",
+        {"type": "object", "properties": {
+            "path": {"type": "string", "description": "the file (in the workspace, or anywhere when file access is full)"},
+            "caption": {"type": "string"},
+            "channel": {"type": "string", "description": "default: the chat you are handling"},
+            "chat_id": {"type": "string"},
+        }, "required": ["path"]},
+    )(lambda args: _send_file(hub, workspace, args))
+
+
+def _send_file(hub: ChannelHub, workspace, args: dict[str, Any]) -> str:
+    from .tools import ToolError
+    p = workspace.resolve(str(args.get("path") or ""))
+    if not p.is_file():
+        raise ToolError(f"no such file: {args.get('path')}")
+    name = str(args.get("channel") or "").strip() or (hub._active[0].name if hub._active else
+                                                      (next(iter(hub.channels)) if len(hub.channels) == 1 else ""))
+    ch = hub.channels.get(name)
+    if ch is None:
+        raise ToolError(f"channel is required (one of: {', '.join(hub.channels)})")
+    if not ch.supports_files:
+        raise ToolError(f"{name} cannot send files yet; tell the owner where the file is: {workspace.show(p)}")
+    chat = str(args.get("chat_id") or "") or (hub._active[1] if hub._active and hub._active[0].name == name else
+                                              ch.owner_chat() or "")
+    if not chat:
+        raise ToolError(f"no chat to send to on {name}")
+    try:
+        how = ch.send_file(chat, p, str(args.get("caption") or ""))
+    except Exception as e:
+        raise ToolError(f"could not send {p.name}: {e}") from None
+    return f"sent {workspace.show(p)} to {name} as a {how}"
+
+
 def _send_message(hub: ChannelHub, args: dict[str, Any]) -> str:
     from .tools import ToolError
     text = str(args.get("text") or "").strip()
@@ -1457,4 +1527,4 @@ def _send_message(hub: ChannelHub, args: dict[str, Any]) -> str:
 
 __all__ = ["Inbound", "ChannelConfig", "Channel", "TelegramChannel", "WhatsAppChannel", "WeChatChannel",
            "SlackChannel", "MatrixChannel", "LineChannel", "DiscordChannel", "WebhookServer", "ChannelHub",
-           "CHANNEL_TYPES", "build_channels", "add_send_message_tool", "chunk", "header"]
+           "CHANNEL_TYPES", "build_channels", "add_send_message_tool", "add_send_file_tool", "chunk", "header"]

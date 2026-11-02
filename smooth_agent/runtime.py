@@ -177,7 +177,8 @@ CHAT_STYLE = (
     "natural, keep it short, use short paragraphs or a simple list, and avoid headers and tables. The owner sees "
     "each tool step live while you work (one progress message that disappears when you answer), so do not send "
     "progress updates with send_message; just do the work and give the final answer. **bold**, `code` and code "
-    "blocks are rendered."
+    "blocks are rendered. To give the owner a file (report, spreadsheet, image, audio), create it in the workspace and "
+    "send it with send_file instead of pasting long content."
 )
 
 

@@ -195,3 +195,59 @@ class HubFileTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class SendFileTests(unittest.TestCase):
+    def test_method_per_type_over_real_http(self):
+        calls = []
+
+        class H(BaseHTTPRequestHandler):
+            def log_message(self, *a):
+                pass
+
+            def do_POST(self):
+                self.rfile.read(int(self.headers.get("content-length", 0)))
+                calls.append(self.path.rsplit("/", 1)[1])
+                self.send_response(200)
+                self.end_headers()
+                self.wfile.write(b'{"ok": true, "result": {}}')
+        srv = HTTPServer(("127.0.0.1", 0), H)
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        d = Path(tempfile.mkdtemp())
+        files = {"a.png": PNG, "b.ogg": b"OggS", "c.mp3": b"ID3", "d.mp4": b"\x00", "e.xlsx": b"PK", "f.pdf": b"%PDF"}
+        for n, b in files.items():
+            (d / n).write_bytes(b)
+        try:
+            with mock.patch.object(chmod, "TELEGRAM_API", f"http://127.0.0.1:{srv.server_address[1]}"):
+                tg = TelegramChannel(ChannelConfig("telegram", owners=["1"], options={"token": "t"}), log=lambda m: None)
+                hows = [tg.send_file("1", d / n) for n in files]
+        finally:
+            srv.shutdown()
+        self.assertEqual(calls, ["sendPhoto", "sendVoice", "sendAudio", "sendVideo", "sendDocument", "sendDocument"])
+        self.assertEqual(hows, ["photo", "voice note", "audio", "video", "document", "document"])
+
+    def test_send_file_tool_targets_the_chat(self):
+        from smooth_agent.channels import add_send_file_tool
+        from smooth_agent.tools import Registry, Workspace
+        ws = Workspace(tempfile.mkdtemp())
+        (ws.root / "r.xlsx").write_bytes(b"PK")
+
+        class FilesChannel(FileChannel):
+            supports_files = True
+
+            def send_file(self, chat_id, path, caption=""):
+                self.sent.append((chat_id, path.name, caption))
+                return "document"
+        ch = FilesChannel({})
+        hub = ChannelHub([ch], lambda *a: None, log=lambda m: None, workspace_root=ws.root)
+        reg = Registry()
+        add_send_file_tool(reg, hub, ws)
+        hub._active = (ch, "77")
+        self.assertEqual(reg.run("send_file", {"path": "r.xlsx", "caption": "ini laporannya"}), "sent r.xlsx to fake as a document")
+        self.assertEqual(ch.sent[-1], ("77", "r.xlsx", "ini laporannya"))
+        self.assertIn("no such file", reg.run("send_file", {"path": "nope.pdf"}))
+        plain = FileChannel({})
+        hub2 = ChannelHub([plain], lambda *a: None, log=lambda m: None)
+        reg2 = Registry()
+        add_send_file_tool(reg2, hub2, ws)
+        self.assertIn("cannot send files yet", reg2.run("send_file", {"path": "r.xlsx"}))

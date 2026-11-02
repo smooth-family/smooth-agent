@@ -413,6 +413,46 @@ def default_registry(workspace: Workspace, *, allow_http: bool = True, terminal:
         return "\n".join(chunk) + more if chunk else f"(no lines: it has {len(lines)} lines)"
 
     @reg.tool(
+        "create_document",
+        "Make a real file for the owner: .docx (Word) from Markdown — # headings, paragraphs, **bold**, `code`, "
+        "- bullets, 1. lists, | tables |, ``` code blocks; .xlsx (Excel) from `sheets` {name: [[header…], [row…]]} or "
+        "CSV text in `content` (first row = bold header, numbers stay numbers, IDs/phone numbers stay text); .csv, "
+        ".md or .txt from `content`. Then send it with send_file.",
+        {"type": "object", "properties": {
+            "path": {"type": "string", "description": "e.g. reports/penjualan.xlsx — the extension picks the format"},
+            "content": {"type": "string", "description": "Markdown (docx/md/txt) or CSV text (csv/xlsx)"},
+            "sheets": {"type": "object", "description": "xlsx: {sheet name: list of rows (lists of cells)}",
+                       "additionalProperties": {"type": "array", "items": {"type": "array"}}},
+        }, "required": ["path"]},
+    )
+    def _create_document(args: dict[str, Any]) -> str:
+        import csv as _csv
+        import io as _io
+        from .documents import write_docx, write_xlsx
+        p = workspace.resolve(args["path"], write=True)
+        ext = p.suffix.lower()
+        content = str(args.get("content") or "")
+        if ext == ".docx":
+            if not content.strip():
+                raise ToolError("content (Markdown) is required for a .docx")
+            write_docx(p, content)
+        elif ext in (".xlsx", ".xlsm"):
+            sheets = args.get("sheets")
+            if not sheets and content.strip():
+                sheets = {"Sheet1": list(_csv.reader(_io.StringIO(content), delimiter="\t" if "\t" in content.split("\n", 1)[0] else ","))}
+            if not isinstance(sheets, dict) or not sheets:
+                raise ToolError("give sheets {name: rows} or CSV text in content for an .xlsx")
+            write_xlsx(p.with_suffix(".xlsx"), sheets)
+            p = p.with_suffix(".xlsx")
+        elif ext in (".csv", ".md", ".txt", ".json", ".html"):
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_text(content, encoding="utf-8")
+        else:
+            raise ToolError("supported: .docx, .xlsx, .csv, .md, .txt (for PDF: make a .docx, or HTML and convert "
+                            "it if a converter is installed)")
+        return f"created {workspace.show(p)} ({p.stat().st_size // 1024 + 1} KB) — send it with send_file"
+
+    @reg.tool(
         "extract_archive",
         "Unpack a zip, rar, 7z, tar(.gz) or .gz archive into the workspace (default: a folder named after the archive, "
         "next to it). Unsafe paths and links inside are skipped and size is capped. Then read the files with read_file.",

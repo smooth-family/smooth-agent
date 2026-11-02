@@ -831,7 +831,7 @@ def _cmd_daemon(args) -> int:
 
 def _start_channels(args, home, log):
     """Build the channel hub on a shared runtime. Returns (hub, runtime) or (None, None)."""
-    from .channels import ChannelHub, add_send_message_tool, build_channels
+    from .channels import ChannelHub, add_send_file_tool, add_send_message_tool, build_channels
     from .config import load_channels
     from .runtime import build_chat_agent, build_runtime
     try:
@@ -878,6 +878,7 @@ def _start_channels(args, home, log):
         log("channels: none started; running scheduled jobs only")
         return None, None
     add_send_message_tool(rt.registry, hub)  # after start, so it lists only the live channels
+    add_send_file_tool(rt.registry, hub, rt.workspace)
     return hub, rt
 
 

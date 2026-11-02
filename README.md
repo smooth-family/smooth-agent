@@ -177,6 +177,12 @@ protected archive). Old binary `.doc`/`.xls` need LibreOffice; RAR and 7z need
 `unrar`, `unar` or 7-Zip on the machine (the Docker image has them) —
 `smooth-agent doctor` shows what this machine can read.
 
+**Get files back.** Ask for a report or a sheet and it makes a real `.docx`
+(headings, tables, lists from Markdown) or `.xlsx` (several sheets, bold frozen
+header, numbers as numbers while phone numbers and IDs keep their leading zeros)
+with `create_document`, and sends it with `send_file` — images arrive as photos,
+`.ogg` as voice notes, everything else as a document (up to 50 MB).
+
 **Talk to it.** Voice notes are transcribed and answered like typed messages
 (`[stt]`: OpenAI, Groq, a local whisper server or a gateway); with
 `voice_replies = "auto"` a voice note gets the answer as text *and* as a voice note
@@ -242,6 +248,9 @@ smooth-agent cron list | run <name> | pause <name> | remove <name>
 |---|---|---|
 | `read_file`, `write_file`, `patch`, `list_dir`, `search_files` | files (documents, spreadsheets and PDFs come back as text) | on |
 | `extract_archive` | unpack zip, rar, 7z, tar, gz safely | on |
+| `create_document` | make .docx / .xlsx / .csv files | on |
+| `send_file` | send a file to you in the chat | when a channel runs |
+| `transcribe_audio` | speech in audio or video files to text | when `[stt]` is set |
 | `web_search`, `web_extract`, `http_get` | search (Tavily / Brave / SearXNG / DuckDuckGo), readable pages, raw APIs | on |
 | `todo` | task list for multi-step work | on |
 | `delegate_task` | up to 6 sub-agents in parallel | on |
@@ -262,7 +271,7 @@ smooth-agent cron list | run <name> | pause <name> | remove <name>
 
 ```bash
 python -m venv .venv && .venv/bin/pip install -e ".[dev]"
-.venv/bin/python -m unittest discover -s tests   # 157 tests, Python 3.9 – 3.13
+.venv/bin/python -m unittest discover -s tests   # 162 tests, Python 3.9 – 3.13
 .venv/bin/python scripts/term_svg.py             # regenerate the README images from real output
 ```
 
