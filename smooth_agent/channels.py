@@ -21,6 +21,7 @@ import hashlib
 import hmac
 import json
 import queue
+import shutil
 import threading
 import time
 import urllib.error
@@ -28,6 +29,7 @@ import urllib.parse
 import urllib.request
 import uuid
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, Callable
 
 TELEGRAM_API = "https://api.telegram.org"
@@ -125,6 +127,43 @@ class Inbound:
     user_id: str = ""     # who sent it
     name: str = ""        # display name, for logs
     raw: dict = field(default_factory=dict)
+    # files sent with the message: {"kind", "file_id", "name", "size", "mime"}; the channel's download() fetches them
+    attachments: list[dict] = field(default_factory=list)
+
+
+def telegram_attachments(msg: dict) -> list[dict]:
+    """The files in one Telegram message: the largest photo size, documents, voice, audio, video."""
+    mid = msg.get("message_id", "")
+    out = []
+    if msg.get("photo"):
+        ph = msg["photo"][-1]  # sizes come smallest first
+        out.append({"kind": "photo", "file_id": ph["file_id"], "name": f"photo-{mid}.jpg", "size": ph.get("file_size", 0),
+                    "mime": "image/jpeg"})
+    for key, ext in (("document", ""), ("voice", ".ogg"), ("audio", ".mp3"), ("video", ".mp4"), ("video_note", ".mp4"),
+                     ("animation", ".mp4")):
+        f = msg.get(key)
+        if f:
+            name = f.get("file_name") or f"{key}-{mid}{ext}"
+            out.append({"kind": key, "file_id": f["file_id"], "name": name, "size": f.get("file_size", 0),
+                        "mime": f.get("mime_type", ""), "duration": f.get("duration")})
+    return out
+
+
+def safe_filename(name: str) -> str:
+    """A file name that is safe on every OS: no folders, no control or reserved characters."""
+    import re
+    name = Path(str(name).replace("\\", "/")).name.strip().strip(".")
+    name = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "_", name)
+    return name[:150] or "file"
+
+
+def unique_path(folder: Path, name: str) -> Path:
+    p = folder / name
+    stem, suffix, n = p.stem, p.suffix, 1
+    while p.exists():
+        p = folder / f"{stem}-{n}{suffix}"
+        n += 1
+    return p
 
 
 @dataclass
@@ -171,6 +210,10 @@ class Channel:
     # --- output ---
     def send(self, chat_id: str, text: str, *, buttons: list[tuple[str, str]] | None = None) -> None:
         raise NotImplementedError
+
+    # --- files the owner sends ---
+    def download(self, att: dict, dest_dir: Path) -> Path:
+        raise RuntimeError(f"{self.kind}: receiving files is not supported yet")
 
     # --- webhook channels ---
     def handle_webhook(self, method: str, path: str, headers: dict[str, str], body: bytes) -> tuple[int, bytes]:
@@ -310,9 +353,54 @@ class TelegramChannel(Channel):
         text = msg.get("text") or msg.get("caption") or ""
         inbound = Inbound(channel=self.name, chat_id=str(chat.get("id")), text=text,
                           user_id=str(frm.get("id") or ""), name=frm.get("username") or frm.get("first_name") or "",
-                          raw=msg)
+                          raw=msg, attachments=telegram_attachments(msg))
+        group = msg.get("media_group_id")
+        if group:  # an album arrives as one message per item: collect them into one
+            self._collect_album(str(group), inbound)
+            return
         if self.hub:
             self.hub.dispatch(self, inbound)
+
+    ALBUM_WAIT = 1.5  # seconds to wait for the rest of an album
+
+    def _collect_album(self, group: str, inbound: Inbound) -> None:
+        if not hasattr(self, "_albums"):
+            self._albums: dict[str, Inbound] = {}
+            self._album_lock = threading.Lock()
+        with self._album_lock:
+            first = self._albums.get(group)
+            if first is None:
+                self._albums[group] = inbound
+                timer = threading.Timer(self.ALBUM_WAIT, self._flush_album, args=(group,))
+                timer.daemon = True
+                timer.start()
+                return
+            first.attachments += inbound.attachments
+            if inbound.text and not first.text:
+                first.text = inbound.text
+
+    def _flush_album(self, group: str) -> None:
+        with self._album_lock:
+            inbound = self._albums.pop(group, None)
+        if inbound is not None and self.hub:
+            self.hub.dispatch(self, inbound)
+
+    MAX_DOWNLOAD = 20 * 1024 * 1024  # the Bot API serves files up to 20 MB
+
+    def download(self, att: dict, dest_dir: Path) -> Path:
+        """Fetch one attachment into dest_dir; returns the saved path."""
+        size = int(att.get("size") or 0)
+        if size > self.MAX_DOWNLOAD:
+            raise RuntimeError(f"{att.get('name')} is {size / 1e6:.0f} MB; Telegram bots can only download files up to 20 MB")
+        info = self._api("getFile", {"file_id": att["file_id"]}, timeout=30)
+        if not info.get("ok"):
+            raise RuntimeError(f"getFile: {info.get('description') or info}")
+        url = f"{TELEGRAM_API}/file/bot{self.token}/{info['result']['file_path']}"
+        dest = unique_path(dest_dir, safe_filename(att.get("name") or Path(info["result"]["file_path"]).name))
+        dest_dir.mkdir(parents=True, exist_ok=True)
+        with urllib.request.urlopen(url, timeout=120) as r, open(dest, "wb") as fh:  # noqa: S310 (Telegram file host)
+            shutil.copyfileobj(r, fh)
+        return dest
 
 
 # ---------------------------------------------------------------- WhatsApp (Cloud API)
@@ -908,8 +996,9 @@ class ChannelHub:
 
     def __init__(self, channels: list[Channel], agent_for: Callable[[str, str, str], Any], *,
                  log: Callable[[str], None] = print, approval_timeout: float = 180.0,
-                 webhook_host: str = "0.0.0.0", webhook_port: int = 8808):
+                 webhook_host: str = "0.0.0.0", webhook_port: int = 8808, workspace_root: Path | None = None):
         self.channels = {c.name: c for c in channels}
+        self.workspace_root = Path(workspace_root) if workspace_root else Path.cwd()  # files sent land in inbox/
         self.agent_for = agent_for
         self.log = log
         self.approval_timeout = approval_timeout
@@ -928,7 +1017,7 @@ class ChannelHub:
 
     # --- intake ---
     def dispatch(self, channel: Channel, inbound: Inbound) -> None:
-        if not inbound.text.strip():
+        if not inbound.text.strip() and not inbound.attachments:
             return
         if not channel.is_owner(inbound):
             self.log(f"{channel.name}: ignored {inbound.chat_id} ({inbound.name})")
@@ -1034,7 +1123,8 @@ class ChannelHub:
         if progress is not None:
             agent.on_event = progress.on_event
         try:
-            turn = agent.run(inbound.text)
+            text = self._receive_files(channel, inbound) if inbound.attachments else inbound.text
+            turn = agent.run(text)
             reply = turn.text or "(no answer)"
             if turn.stopped == "max_steps":
                 reply += "\n\n(stopped at the step limit)"
@@ -1053,13 +1143,46 @@ class ChannelHub:
         except Exception as e:
             self.log(f"{channel.name}: send error: {e}")
 
+    def _receive_files(self, channel: Channel, inbound: Inbound) -> str:
+        """Download what the owner sent into workspace/inbox/<date>/ and tell the agent what arrived."""
+        from .documents import kind_of
+        folder = self.workspace_root / "inbox" / time.strftime("%Y-%m-%d")
+        lines = []
+        for att in inbound.attachments:
+            try:
+                path = channel.download(att, folder)
+            except Exception as e:
+                self.log(f"{channel.name}: download failed: {e}")
+                lines.append(f"- {att.get('name')}: could not be downloaded ({e})")
+                continue
+            rel = path.relative_to(self.workspace_root).as_posix() if self.workspace_root in path.parents else str(path)
+            size = path.stat().st_size
+            human = f"{size / 1e6:.1f} MB" if size >= 1e6 else f"{max(1, size // 1024)} KB"
+            kind = kind_of(path)
+            if att.get("kind") in ("voice", "audio", "video", "video_note", "animation"):
+                how = f"{att['kind']} file" + (f", {att['duration']} s" if att.get("duration") else "") + \
+                      " — listening/watching is not available yet; say so if it matters"
+            elif kind == "image":
+                how = "image — look at it with vision_analyze"
+            elif kind == "archive":
+                how = "archive — read_file lists it, extract_archive unpacks it (ask for a password if it needs one)"
+            elif kind == "document":
+                how = "document — read_file converts it to text"
+            else:
+                how = "read it with read_file"
+            lines.append(f"- {rel} ({human}): {how}")
+        ask = inbound.text.strip() or ("(The owner sent this without a message: look at it and tell them briefly "
+                                       "what it is and what is in it.)")
+        return f"{ask}\n\n[files the owner sent, saved in your workspace]\n" + "\n".join(lines)
+
     def _run(self) -> None:
         while not self._stop:
             item = self._q.get()
             if item is None:
                 return
             channel, inbound = item
-            self.log(f"{channel.name}: {inbound.name or inbound.chat_id}: {inbound.text[:80]}")
+            files = f" [+{len(inbound.attachments)} file(s)]" if inbound.attachments else ""
+            self.log(f"{channel.name}: {inbound.name or inbound.chat_id}: {inbound.text[:80]}{files}")
             with self._turn:
                 self._handle(channel, inbound)
 

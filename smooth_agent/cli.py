@@ -423,7 +423,18 @@ def _cmd_doctor(args) -> int:
     from .mcp import load_servers
     servers = load_servers(cfg, home)
     print(f"{ok(bool(servers))} mcp         {', '.join(servers) or 'no servers (smooth-agent mcp add …)'}")
-    for b in ("git", "node", "npx", "ffmpeg", "gh"):
+    try:
+        import pypdf  # noqa: F401
+        pdf = "pypdf"
+    except ImportError:
+        pdf = "pdftotext" if shutil.which("pdftotext") else ""
+    print(f"{ok(bool(pdf))} pdf         {pdf or 'missing — pip install pypdf'}"
+          f"{'; scanned PDFs → images via pdftoppm' if shutil.which('pdftoppm') else '; scanned PDFs need pdftoppm (poppler)'}")
+    print(f"{ok(True)} office      Word, Excel, PowerPoint, OpenDocument (built in)"
+          f"{'; old .doc/.xls via LibreOffice' if shutil.which('libreoffice') or shutil.which('soffice') else ''}")
+    rar = next((b for b in ("unrar", "7z", "7zz", "unar", "bsdtar") if shutil.which(b)), "")
+    print(f"{ok(bool(rar))} archives    zip, tar, gz built in; rar/7z {'via ' + rar if rar else 'need unrar, unar or 7-Zip'}")
+    for b in ("git", "node", "npx", "ffmpeg", "gh", "tesseract"):
         print(f"{ok(bool(shutil.which(b)))} {b:<11} {shutil.which(b) or 'not found'}")
     return 0
 
@@ -856,7 +867,8 @@ def _start_channels(args, home, log):
         rt.close()
         return None, None
     hub = ChannelHub(channels, lambda sid, ch, chat: build_chat_agent(rt, sid, ch, chat), log=log,
-                     webhook_host=chcfg.webhook_host, webhook_port=chcfg.webhook_port)
+                     webhook_host=chcfg.webhook_host, webhook_port=chcfg.webhook_port,
+                     workspace_root=rt.workspace.root)
     hub_ref["hub"] = hub
     hub.start()
     if not hub.channels:  # every channel failed to start: run schedules only

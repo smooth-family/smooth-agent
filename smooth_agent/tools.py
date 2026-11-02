@@ -356,8 +356,11 @@ def default_registry(workspace: Workspace, *, allow_http: bool = True, terminal:
 
     @reg.tool(
         "read_file",
-        "Read a UTF-8 text file from the workspace. For big files pass offset (1-based first line) and limit (lines); "
-        "lines come back numbered so patch/search results line up.",
+        "Read a file. Text comes back as is; documents are converted to text first: PDF (a scanned PDF is rendered to "
+        "page images for vision_analyze), Word .docx, Excel .xlsx (tab-separated, per sheet), PowerPoint .pptx, "
+        "OpenDocument, old .doc/.xls when a converter is installed. Images return their size and any OCR text (look "
+        "at them with vision_analyze); archives (zip, rar, 7z, tar) return their file list (unpack with "
+        "extract_archive). For big files pass offset (1-based first line) and limit (lines).",
         {"type": "object", "properties": {
             "path": {"type": "string"},
             "offset": {"type": "integer", "minimum": 1, "description": "first line to return (1-based)"},
@@ -368,6 +371,16 @@ def default_registry(workspace: Workspace, *, allow_http: bool = True, terminal:
         p = workspace.resolve(args["path"])
         if not p.is_file():
             raise ToolError(f"no such file: {args['path']}")
+        from .documents import DocumentError, extract_text, kind_of
+        if kind_of(p) != "text":  # PDF, Office, OpenDocument, images, archives -> text
+            render_dir = (p.parent if workspace.inside(p) else workspace.root / "pages") / f"{p.stem}-pages"
+            try:
+                ex = extract_text(p, render_dir=render_dir)
+            except DocumentError as e:
+                raise ToolError(str(e)) from None
+            note = ex.note.replace(str(workspace.root) + os.sep, "")
+            header = f"[{ex.kind}: {workspace.show(p)}" + (f" — {note}" if note else "") + "]"
+            return header + "\n" + _window(ex.text or "(no text in it)", args)
         if not args.get("offset") and not args.get("limit"):
             data = p.read_bytes()[:MAX_READ_BYTES]
             text = data.decode("utf-8", "replace")
@@ -386,6 +399,48 @@ def default_registry(workspace: Workspace, *, allow_http: bool = True, terminal:
             return f"(no lines: file has {total} lines)"
         more = f"\n...[{total - (start + limit - 1)} more lines]" if total >= start + limit else ""
         return "\n".join(out) + more
+
+    def _window(text: str, args: dict[str, Any]) -> str:
+        """offset/limit over converted text (same numbering as plain files); else cap the size."""
+        if not args.get("offset") and not args.get("limit"):
+            return text if len(text) <= MAX_READ_BYTES else (
+                text[:MAX_READ_BYTES] + f"\n...[cut at {MAX_READ_BYTES} characters; use offset/limit to read further]")
+        lines = text.splitlines()
+        start = max(1, int(args.get("offset") or 1))
+        limit = max(1, min(int(args.get("limit") or 400), 5000))
+        chunk = [f"{i:6}\t{ln}" for i, ln in enumerate(lines[start - 1:start - 1 + limit], start)]
+        more = f"\n...[{len(lines) - (start + limit - 1)} more lines]" if len(lines) >= start + limit else ""
+        return "\n".join(chunk) + more if chunk else f"(no lines: it has {len(lines)} lines)"
+
+    @reg.tool(
+        "extract_archive",
+        "Unpack a zip, rar, 7z, tar(.gz) or .gz archive into the workspace (default: a folder named after the archive, "
+        "next to it). Unsafe paths and links inside are skipped and size is capped. Then read the files with read_file.",
+        {"type": "object", "properties": {
+            "path": {"type": "string", "description": "the archive"},
+            "dest": {"type": "string", "description": "folder in the workspace to unpack into (optional)"},
+            "password": {"type": "string", "description": "for a password-protected archive (ask the owner)"},
+        }, "required": ["path"]},
+    )
+    def _extract_archive(args: dict[str, Any]) -> str:
+        import re as _re
+        from .documents import DocumentError, extract_archive
+        src = workspace.resolve(args["path"])
+        if not src.is_file():
+            raise ToolError(f"no such file: {args['path']}")
+        stem = _re.sub(r"(\.tar)?\.(zip|rar|7z|tar|tgz|tbz2|txz|gz|bz2|xz)$", "", src.name, flags=_re.I) or "archive"
+        if args.get("dest"):
+            dest = workspace.resolve(args["dest"], write=True)
+        else:
+            dest = (src.parent if workspace.inside(src) else workspace.root / "extracted") / stem
+        try:
+            files = extract_archive(src, dest, password=args.get("password") or None)
+        except DocumentError as e:
+            raise ToolError(str(e)) from None
+        size = sum(f.stat().st_size for f in files)
+        listing = "\n".join(workspace.show(f) for f in files[:40])
+        more = f"\n… {len(files) - 40} more" if len(files) > 40 else ""
+        return f"unpacked {len(files)} files ({size / 1e6:.1f} MB) into {workspace.show(dest)}\n{listing}{more}"
 
     @reg.tool(
         "write_file", "Create or overwrite a UTF-8 text file in the workspace.",

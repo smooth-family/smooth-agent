@@ -64,7 +64,7 @@ Build with Chromium for the browser tools: set `BROWSER: "1"` in
 
 ```bash
 git clone https://github.com/smooth-family/smooth-agent && cd smooth-agent
-pip install -e .                       # core: standard library only
+pip install -e .                       # core: standard library + pypdf
 pip install -e ".[browser]"            # + browser automation
 python -m playwright install chromium  # (once, for the browser)
 ```
@@ -115,7 +115,7 @@ Everything lives in `~/.smooth-agent/` (override with `SMOOTH_AGENT_HOME`):
 - **Safe by default.** File tools are confined to one workspace folder (or the whole machine, with approvals, if you choose); shell and
   code run only when you switch them on, ask before each command, and never see
   your API keys; keys are redacted from everything printed.
-- **Yours to modify.** MIT licensed. The core uses only the Python standard library.
+- **Yours to modify.** MIT licensed. The core needs only the Python standard library and pypdf.
 
 ## Chat channels
 
@@ -165,6 +165,17 @@ the model for that chat, `/stop` ends what the agent is doing, `/help`. While it
 works you see one live message with its steps, shell-style — `$ git pull`,
 `read app.py`, `write app.py`, `search …`, `open https://…` — which disappears
 when the answer arrives.
+
+**Send it files.** Photos, PDFs, Word, Excel, PowerPoint, OpenDocument, zip,
+rar, 7z, tar — on Telegram just send them (an album counts as one message, a
+caption is the request). They land in `workspace/inbox/<date>/` and the agent
+reads them: `read_file` turns documents into text (spreadsheets per sheet,
+tab-separated; a scanned PDF becomes page images for the vision model), photos go
+to the vision model, and `extract_archive` unpacks archives safely (no paths
+outside the folder, no links, size limits; it asks for the password of a
+protected archive). Old binary `.doc`/`.xls` need LibreOffice; RAR and 7z need
+`unrar`, `unar` or 7-Zip on the machine (the Docker image has them) —
+`smooth-agent doctor` shows what this machine can read.
 
 ## Persona files
 
@@ -224,7 +235,8 @@ smooth-agent cron list | run <name> | pause <name> | remove <name>
 
 | Tool | What it does | Default |
 |---|---|---|
-| `read_file`, `write_file`, `patch`, `list_dir`, `search_files` | files inside the workspace | on |
+| `read_file`, `write_file`, `patch`, `list_dir`, `search_files` | files (documents, spreadsheets and PDFs come back as text) | on |
+| `extract_archive` | unpack zip, rar, 7z, tar, gz safely | on |
 | `web_search`, `web_extract`, `http_get` | search (Tavily / Brave / SearXNG / DuckDuckGo), readable pages, raw APIs | on |
 | `todo` | task list for multi-step work | on |
 | `delegate_task` | up to 6 sub-agents in parallel | on |
@@ -245,7 +257,7 @@ smooth-agent cron list | run <name> | pause <name> | remove <name>
 
 ```bash
 python -m venv .venv && .venv/bin/pip install -e ".[dev]"
-.venv/bin/python -m unittest discover -s tests   # 116 tests, Python 3.9 – 3.13
+.venv/bin/python -m unittest discover -s tests   # 146 tests, Python 3.9 – 3.13
 .venv/bin/python scripts/term_svg.py             # regenerate the README images from real output
 ```
 

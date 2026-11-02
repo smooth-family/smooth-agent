@@ -15,9 +15,10 @@ ENV PYTHONUNBUFFERED=1 \
     SMOOTH_AGENT_HOME=/data \
     PLAYWRIGHT_BROWSERS_PATH=/opt/playwright
 
-# git: skills install from git URLs; tini: clean signals so the daemon shuts down gracefully
+# git: skills install from git URLs; tini: clean signals so the daemon shuts down gracefully;
+# unar + 7zip: RAR and 7z archives; poppler-utils: scanned PDFs rendered to images for vision
 RUN apt-get update \
- && apt-get install -y --no-install-recommends git ca-certificates tini \
+ && apt-get install -y --no-install-recommends git ca-certificates tini unar 7zip poppler-utils \
  && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /src
