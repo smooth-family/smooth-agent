@@ -9,11 +9,19 @@
   <img src="https://img.shields.io/badge/channels-7-b65cff" alt="7 chat channels">
   <img src="https://img.shields.io/badge/docker-ready-2496ED?logo=docker&logoColor=white" alt="Docker">
   <img src="https://img.shields.io/badge/license-MIT-22c55e" alt="MIT">
+  <a href="https://smooth.family/docs/quickstart-agent"><img src="https://img.shields.io/badge/docs-smooth.family-287CFA" alt="Docs"></a>
 </p>
 
 <p align="center">
   A self-hosted AI agent that runs on your own machine, with your own keys, on any LLM you choose —<br>
   and that you can talk to from Telegram, WhatsApp, Slack, Matrix, LINE and more.
+</p>
+
+<p align="center">
+  <b><a href="https://smooth.family/docs/quickstart-agent">Documentation</a></b> ·
+  <a href="https://smooth.family/docs/id/quickstart-agent">Dokumentasi (Bahasa Indonesia)</a> ·
+  <a href="https://smooth.family/docs/agent/channels">Chat channels</a> ·
+  <a href="https://smooth.family/docs/agent/cli">CLI reference</a>
 </p>
 
 ---
