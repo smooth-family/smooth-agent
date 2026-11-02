@@ -53,16 +53,27 @@ the config obvious, and every stage runnable by someone who just `git clone`d it
   nothing changed) and the `[SILENT]` reply.
 - `clarify` tool.
 
-## Stage 4 — Channels + installer (next)
+## Stage 4 — Channels + installer
 
-- Chat channels for one owner, picked during setup: Telegram, WhatsApp and
-  WeChat first, then Discord, Slack, Signal, Matrix, LINE, Feishu/Lark, MS
-  Teams, Google Chat, email, SMS and more (`send_message` tool, owner-only
-  access, approvals by button, cron results delivered to a channel).
+Done (v0.5.0):
+
+- Chat channels for one owner, picked during setup: Telegram (full: long-poll,
+  inline-button tool approvals, owner allowlist), WhatsApp (Cloud API send +
+  webhook), WeChat Work (delivery robot). `send_message` tool, owner-only
+  access, cron results delivered to a channel (`deliver = "telegram"`).
+- One saved session per chat (persists across restarts); a single worker
+  serializes turns so the model is never hit by parallel requests.
+- `smooth-agent daemon` runs channels + cron together; `smooth-agent service`
+  writes a systemd user unit; `smooth-agent channels list/test`.
+
+Still to do:
+
+- More channels: Discord, Slack, Signal, Matrix, LINE, Feishu/Lark, MS Teams,
+  Google Chat, email, SMS (same `Channel` base).
 - A good-looking installer: one-line install script with a Smooth Agent banner,
-  colours and clear steps; channel choices in `smooth-agent setup`.
+  colours and clear steps.
 - A polished GitHub page: banner, badges, screenshots.
-- `smooth-agent daemon` runs channels + cron as a service (systemd unit, launchd plist).
+- launchd plist for macOS.
 - Docker image, `pipx install`, one-command install script.
 
 ## Later
