@@ -79,11 +79,22 @@ python ${SKILL_DIR}/scripts/watch_http_json.py \
 
 ## Wiring into cron
 
-Ask the agent to schedule a cron job with a prompt like:
+Cheapest: a script job. The script runs on schedule; when it prints nothing the
+run ends quietly (no model call, no message); when it prints new items they are
+reported as they are:
 
-> Every 15 minutes, run `watch_rss.py --name hn --url https://news.ycombinator.com/rss`. If it prints anything, summarize the headlines and deliver them. If it prints nothing, stay silent.
+```bash
+smooth-agent cron add hn "*/15 * * * *" --script "python3 ${SKILL_DIR}/scripts/watch_rss.py --name hn --url https://news.ycombinator.com/rss"
+```
 
-The agent invokes the script via the terminal tool inside the cron job's agent loop; no changes to cron's built-in `--script` flag are needed.
+Add a prompt to have the agent work on the new items (it only runs when there are some):
+
+```bash
+smooth-agent cron add hn "*/15 * * * *" "Summarise these new headlines in 5 bullets." --script "python3 ${SKILL_DIR}/scripts/watch_rss.py --name hn --url https://news.ycombinator.com/rss"
+```
+
+From a chat, the agent can create the same with `cronjob(action="create", name="hn", schedule="*/15 * * * *", script="…", prompt="…")`
+(scheduled scripts need `[tools] terminal = true` and the owner's OK). Jobs run while `smooth-agent daemon` is running.
 
 ## State files
 

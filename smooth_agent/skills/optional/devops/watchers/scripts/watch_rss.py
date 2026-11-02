@@ -1,12 +1,10 @@
 #!/usr/bin/env python3
 """Watch an RSS 2.0 or Atom feed; print new items to stdout, silent on empty.
 
-Usage (via cron with --no-agent):
+Usage (as a scheduled script job):
 
-    smooth-agent cron create my-feed \\
-      --schedule "*/15 * * * *" --no-agent \\
-      --script "${SKILL_DIR}/scripts/watch_rss.py" \\
-      --script-args "--name hn --url https://news.ycombinator.com/rss"
+    smooth-agent cron add my-feed "*/15 * * * *" \\
+      --script "python3 ${SKILL_DIR}/scripts/watch_rss.py --name hn --url https://news.ycombinator.com/rss"
 
 First run records a baseline (emits nothing).  Subsequent runs emit only
 items whose <guid> / <id> isn't in the watermark.

@@ -1,12 +1,10 @@
 #!/usr/bin/env python3
 """Watch GitHub activity — issues, pulls, releases, or commits — with dedup.
 
-Usage (via cron with --no-agent):
+Usage (as a scheduled script job):
 
-    smooth-agent cron create smooth-agent-issues \\
-      --schedule "*/5 * * * *" --no-agent \\
-      --script "${SKILL_DIR}/scripts/watch_github.py" \\
-      --script-args "--name smooth-agent-issues --repo smooth-family/smooth-agent --scope issues"
+    smooth-agent cron add smooth-agent-issues "*/5 * * * *" \\
+      --script "python3 ${SKILL_DIR}/scripts/watch_github.py --name smooth-agent-issues --repo smooth-family/smooth-agent --scope issues"
 
 Set GITHUB_TOKEN (or GH_TOKEN) in the Smooth Agent .env file
 (``${SMOOTH_AGENT_HOME:-~/.smooth-agent}/.env``) to avoid the 60 req/hr

@@ -66,6 +66,24 @@ model = "gpt-image-1"
 `smooth-agent skills list|search <words>|install <name|git-url|path>|remove <name>`.
 The agent can also write its own with the `skill_manage` tool.
 
+## Memory and sessions
+
+- `smooth-agent memory list|add|search|remove|pin` — the same notes the `memory`
+  tool writes; pinned and relevant ones are recalled into every message.
+- `smooth-agent sessions list|show|search`, `smooth-agent run --resume`.
+- `[agent] memory = false` turns memory and saved sessions off.
+
+## Scheduled jobs
+
+- `smooth-agent cron add <name> "<schedule>" "<prompt>"` — schedules: `daily 07:00`,
+  `weekdays 08:30`, `weekly mon 09:00`, `every 2h`, `*/15 * * * *`, `at 2026-11-03 09:00`.
+- `--script "<command>"` makes a watcher: the command runs first; no output means
+  nothing to report (no model call); with a prompt, the agent works on the output.
+- A run that replies exactly `[SILENT]` sends nothing.
+- Jobs run only while `smooth-agent daemon` is running; `smooth-agent jobs` shows
+  results and failures (each failed run is retried with backoff).
+- Set `[agent] timezone` so schedules use the owner's local time.
+
 ## Troubleshooting
 
 - "no key" → add the variable to `~/.smooth-agent/.env`.

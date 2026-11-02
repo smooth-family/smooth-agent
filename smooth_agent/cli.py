@@ -117,11 +117,26 @@ def _runtime(args):
     except FileNotFoundError:
         pass
     rt = build_runtime(args.config, approver=_approver(args, cfg_confirm), provider=args.provider,
-                       workspace=args.workspace, max_steps=args.max_steps or None, overrides=overrides)
+                       workspace=args.workspace, max_steps=args.max_steps or None, overrides=overrides,
+                       ask=_clarify_prompt if sys.stdin.isatty() else None)
     rt.agent.on_event = _print_event
     for w in rt.warnings:
         print(f"  ! {w}", file=sys.stderr)
     return rt
+
+
+def _clarify_prompt(question: str, choices: list[str]) -> str | None:
+    with _approve_lock:
+        print(f"\n  ? {question}", flush=True)
+        for i, c in enumerate(choices, 1):
+            print(f"    {i}. {c}")
+        try:
+            ans = input("    answer: ").strip()
+        except EOFError:
+            return None
+    if ans.isdigit() and choices and 1 <= int(ans) <= len(choices):
+        return choices[int(ans) - 1]
+    return ans or None
 
 
 def _print_event(event: str, data) -> None:
@@ -137,6 +152,8 @@ def _print_event(event: str, data) -> None:
         print(f"{pad}! {redact(data['message'])}", flush=True)
     elif event == "process_done":
         print(f"{pad}✓ {redact(data['text'].splitlines()[0])}", flush=True)
+    elif event == "compressed":
+        print(f"{pad}(compressed {data['messages']} older messages to keep the context small)", flush=True)
 
 
 def _cmd_ask(args) -> int:
@@ -161,10 +178,22 @@ def _cmd_run(args) -> int:
     except (FileNotFoundError, RouterError) as e:
         return _err(str(e))
     with rt:
+        if args.resume:
+            if rt.store is None:
+                return _err("sessions are off ([agent] memory = false)")
+            sid = args.resume
+            if sid == "last":
+                rows = [r for r in rt.store.sessions(5, channel="cli") if r["id"] != rt.agent.session_id and r["n"]]
+                if not rows:
+                    return _err("no earlier session to resume")
+                sid = rows[0]["id"]
+            n = rt.agent.resume(sid)
+            print(f"resumed session {sid} ({n} messages)")
         tools = len(rt.registry.names())
         skills = len(rt.agent.skills.available()) if rt.agent.skills else 0
-        print(f"smooth-agent {__version__} — {tools} tools, {skills} skills — workspace: {rt.workspace.root}")
-        print("type a message, /reset to clear, /exit to quit.")
+        mem = f", {rt.memory.count()} memories" if rt.memory else ""
+        print(f"smooth-agent {__version__} — {tools} tools, {skills} skills{mem} — workspace: {rt.workspace.root}")
+        print("type a message; /reset starts a new session, /exit quits.")
         while True:
             try:
                 line = input("\nyou> ").strip()
@@ -177,7 +206,7 @@ def _cmd_run(args) -> int:
                 return 0
             if line == "/reset":
                 rt.agent.reset()
-                print("(conversation reset)")
+                print(f"(new session {rt.agent.session_id})")
                 continue
             turn = rt.agent.run(line)
             print(f"\nsmooth> {turn.text}")
@@ -458,6 +487,201 @@ def _mcp_check(sc) -> int:
     return 0
 
 
+# ---------- sessions / memory ----------
+
+def _store():
+    from .store import Store
+    return Store(ensure_home() / "smooth.db")
+
+
+def _when(ts: float) -> str:
+    import time as _t
+    return _t.strftime("%Y-%m-%d %H:%M", _t.localtime(ts)) if ts else "-"
+
+
+def _cmd_sessions(args) -> int:
+    st = _store()
+    action = args.action or "list"
+    if action == "list":
+        for r in st.sessions(args.limit):
+            print(f"{r['id']:<28} {_when(r['updated'])}  {r['channel']:<8} {r['n']:>4} msgs  {(r['title'] or '')[:60]}")
+        return 0
+    if action == "show":
+        if not args.arg:
+            return _err("usage: smooth-agent sessions show <id>")
+        for m in st.session_messages(args.arg):
+            role = m.get("role")
+            if role == "tool":
+                print(f"  [tool result] {redact(str(m.get('content')))[:300]}")
+            elif m.get("tool_calls"):
+                for c in m["tool_calls"]:
+                    print(f"  [{c.get('function', {}).get('name')}] {redact(str(c.get('function', {}).get('arguments')))[:200]}")
+            else:
+                print(f"\n{role}> {redact(str(m.get('content') or ''))}")
+        return 0
+    if action == "search":
+        rows = st.search_messages(args.arg or "", args.limit)
+        for r in rows:
+            print(f"{_when(r['created'])} [{r['session_id']}] {r['role']}: {redact(r['snip'])}")
+        return 0 if rows else _err("nothing found")
+    if action == "delete":
+        if not args.arg or not st.delete_session(args.arg):
+            return _err(f"no session '{args.arg}'")
+        print(f"deleted {args.arg}")
+        return 0
+    return _err("actions: list, show <id>, search <words>, delete <id>")
+
+
+def _cmd_memory(args) -> int:
+    from .memory import KINDS, Memory
+    from .tools import ToolError
+    mem = Memory(_store())
+    action = args.action or "list"
+    try:
+        if action == "list":
+            rows = mem.list(args.kind)
+            for r in rows:
+                print(f"#{r['id']:<5} {r['kind']:<11}{' *' if r['pinned'] else '  '} {r['text']}")
+            print(f"\n{len(rows)} memories" + (" (* = pinned)" if any(r["pinned"] for r in rows) else ""))
+            return 0
+        if action == "add":
+            if not args.text:
+                return _err('usage: smooth-agent memory add "text" [--kind preference]')
+            print(f"remembered #{mem.add(' '.join(args.text), args.kind or 'note')}")
+            return 0
+        if action == "search":
+            for r in mem.search(" ".join(args.text or []), 20):
+                print(f"#{r['id']:<5} {r['kind']:<11} {r['text']}")
+            return 0
+        if action in ("remove", "pin", "unpin"):
+            if not args.text or not args.text[0].lstrip("#").isdigit():
+                return _err(f"usage: smooth-agent memory {action} <id>")
+            mid = int(args.text[0].lstrip("#"))
+            if action == "remove":
+                if not mem.delete(mid):
+                    return _err(f"no memory #{mid}")
+                print(f"forgot #{mid}")
+                return 0
+            mem.update(mid, pinned=action == "pin")
+            print(f"{action}ned #{mid}")
+            return 0
+    except ToolError as e:
+        return _err(str(e))
+    return _err(f"actions: list [--kind {'|'.join(KINDS)}], add <text>, search <words>, remove|pin|unpin <id>")
+
+
+# ---------- cron / jobs / daemon ----------
+
+def _tz(args) -> str | None:
+    try:
+        return Settings.from_config(load_config(args.config)).timezone or None
+    except FileNotFoundError:
+        return None
+
+
+def _cmd_cron(args) -> int:
+    from .schedule import parse
+    from .scheduler import Crons, DaemonLock, fmt_time
+    from .tools import ToolError
+    st = _store()
+    tz = _tz(args)
+    crons = Crons(st, tz)
+    action = args.action or "list"
+    try:
+        if action == "list":
+            rows = crons.list()
+            for r in rows:
+                runs = f"{r['runs']}/{r['repeat']}" if r["repeat"] else str(r["runs"])
+                print(f"{r['name']:<20} {'on ' if r['enabled'] else 'off'} {r['schedule']:<20} next {fmt_time(r['next_run'], tz):<16} "
+                      f"runs {runs:<5} {r['last_status'] or '-':<5} {(r['prompt'] or '$ ' + (r.get('script') or ''))[:50]}")
+            if not rows:
+                print('no cron jobs. add one:\n  smooth-agent cron add morning "daily 07:00" "Summarise the top tech news for me"')
+            elif not DaemonLock.running(ensure_home()):
+                print("\nnote: the scheduler is not running — start it with `smooth-agent daemon` (or install it as a service).")
+            return 0
+        if action == "add":
+            if len(args.rest) < 3 and not (len(args.rest) == 2 and args.script):
+                return _err('usage: smooth-agent cron add <name> "<schedule>" "<prompt>" [--script CMD] [--repeat N] [--skill NAME]...')
+            name, schedule, prompt = args.rest[0], args.rest[1], " ".join(args.rest[2:])
+            r = crons.create(name, schedule, prompt, repeat=args.repeat or 0, skills=args.skill or [],
+                             deliver=args.deliver or "", model=args.model or "", script=args.script or "")
+            print(f"added '{name}' — {parse(schedule).describe()}, next run {fmt_time(r['next_run'], tz)}")
+            if not DaemonLock.running(ensure_home()):
+                print("start the scheduler with: smooth-agent daemon")
+            return 0
+        if not args.rest:
+            return _err(f"usage: smooth-agent cron {action} <name>")
+        if action in ("pause", "resume"):
+            r = crons.update(args.rest[0], enabled=action == "resume")
+            print(f"{r['name']}: {'on, next ' + fmt_time(r['next_run'], tz) if r['enabled'] else 'paused'}")
+            return 0
+        if action == "remove":
+            if not crons.remove(args.rest[0]):
+                return _err(f"no cron job '{args.rest[0]}'")
+            print(f"removed {args.rest[0]}")
+            return 0
+        if action == "run":
+            # run it right now in this terminal (handy to test a prompt or a script)
+            from .scheduler import Jobs, Scheduler
+            cr = crons.get(args.rest[0])
+            out: list[str] = []
+            sched = Scheduler(st, ensure_home(), lambda prompt, c: _run_job(args, prompt, c), tz=tz,
+                              deliver=[lambda c, text, ok: out.append(text)], log=lambda m: print(m, file=sys.stderr))
+            Jobs(st).enqueue("cron", {"name": cr["name"]}, priority=10)
+            sched.run_one()
+            print(out[0] if out else "(nothing to report)")
+            return 0
+    except ToolError as e:
+        return _err(str(e))
+    return _err("actions: list, add, pause, resume, remove, run")
+
+
+def _run_job(args, prompt: str, cr: dict) -> str:
+    """One scheduled run: a fresh agent, its own session, no human to ask."""
+    from .runtime import build_runtime, new_session_id
+    confirm = True
+    try:
+        confirm = Settings.from_config(load_config(args.config)).confirm
+    except FileNotFoundError:
+        pass
+    approver = (lambda _n, _a: True) if not confirm else (lambda _n, _a: False)
+    rt = build_runtime(args.config, approver=approver, ask=None, channel="cron",
+                       session_id=new_session_id(f"cron-{cr['name']}-"), model=cr.get("model") or None)
+    with rt:
+        rt.agent.system += ("\n\nThis is a scheduled run with no one watching: do the task completely on your own, "
+                            "then reply with the result the owner should read.")
+        turn = rt.agent.run(prompt)
+        return turn.text + (f"\n\n[stopped: {turn.stopped}]" if turn.stopped else "")
+
+
+def _cmd_jobs(args) -> int:
+    from .scheduler import Jobs
+    for j in Jobs(_store()).list(args.state, args.limit):
+        payload = json.loads(j["payload"] or "{}")
+        err = f" — {j['last_error'].splitlines()[0][:80]}" if j["last_error"] else ""
+        print(f"#{j['id']:<5} {j['state']:<8} {j['kind']}:{payload.get('name', '')}  try {j['attempts']}/{j['max_attempts']}  {_when(j['updated'])}{err}")
+    return 0
+
+
+def _cmd_daemon(args) -> int:
+    import signal
+    import time as _t
+    from .scheduler import DaemonLock, Scheduler
+    home = ensure_home()
+    load_dotenv(home / ".env")
+    lock = DaemonLock(home)
+    if not lock.acquire():
+        return _err(f"a daemon is already running for {home}")
+    sched = Scheduler(_store(), home, lambda prompt, cr: _run_job(args, prompt, cr), tz=_tz(args),
+                      log=lambda m: print(f"{_when(_t.time())} {m}", flush=True))
+    signal.signal(signal.SIGTERM, lambda *_: sched.stop())
+    signal.signal(signal.SIGINT, lambda *_: sched.stop())
+    print(f"smooth-agent daemon {__version__} — home {home}; checking schedules every {args.interval:g}s", flush=True)
+    sched.loop(interval=args.interval, once=args.once)
+    print("daemon stopped", flush=True)
+    return 0
+
+
 # ---------- parser ----------
 
 def _add_agent_args(sp) -> None:
@@ -506,7 +730,40 @@ def build_parser() -> argparse.ArgumentParser:
 
     sp = sub.add_parser("run", help="interactive agent session with tools")
     _add_agent_args(sp)
+    sp.add_argument("--resume", nargs="?", const="last", help="continue a saved session (id, default: the last one)")
     sp.set_defaults(func=_cmd_run)
+
+    sp = sub.add_parser("sessions", help="saved conversations: list / show / search / delete")
+    sp.add_argument("action", nargs="?", choices=["list", "show", "search", "delete"], default="list")
+    sp.add_argument("arg", nargs="?")
+    sp.add_argument("--limit", type=int, default=30)
+    sp.set_defaults(func=_cmd_sessions)
+
+    sp = sub.add_parser("memory", help="long-term memory: list / add / search / remove / pin / unpin")
+    sp.add_argument("action", nargs="?", choices=["list", "add", "search", "remove", "pin", "unpin"], default="list")
+    sp.add_argument("text", nargs="*")
+    sp.add_argument("--kind", help="user, preference, decision, finding, blocker, note")
+    sp.set_defaults(func=_cmd_memory)
+
+    sp = sub.add_parser("cron", help="scheduled agent runs: list / add / pause / resume / remove / run")
+    sp.add_argument("action", nargs="?", choices=["list", "add", "pause", "resume", "remove", "run"], default="list")
+    sp.add_argument("rest", nargs="*", help='add: <name> "<schedule>" "<prompt>"; others: <name>')
+    sp.add_argument("--repeat", type=int, help="stop after N runs")
+    sp.add_argument("--skill", action="append", help="skill to load before the run (repeatable)")
+    sp.add_argument("--deliver", help="where to send the result (e.g. telegram)")
+    sp.add_argument("--model", help="model for this job (default: the provider's)")
+    sp.add_argument("--script", help="shell command run first; empty output = nothing to report (watchers)")
+    sp.set_defaults(func=_cmd_cron)
+
+    sp = sub.add_parser("jobs", help="the job queue (scheduled runs and their results)")
+    sp.add_argument("--state", choices=["queued", "running", "done", "failed"])
+    sp.add_argument("--limit", type=int, default=30)
+    sp.set_defaults(func=_cmd_jobs)
+
+    sp = sub.add_parser("daemon", help="run scheduled jobs (keep it running, or install it as a service)")
+    sp.add_argument("--interval", type=float, default=15.0, help="seconds between schedule checks")
+    sp.add_argument("--once", action="store_true", help="check once, run what is due, then exit")
+    sp.set_defaults(func=_cmd_daemon)
 
     sp = sub.add_parser("skills", help="list / search / install / remove skills")
     sp.add_argument("action", nargs="?", choices=["list", "search", "install", "remove"], default="list")

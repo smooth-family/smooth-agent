@@ -76,6 +76,10 @@ class Settings:
     max_steps: int = 12
     max_tokens: int = 1536
     instructions: str = ""         # extra system instructions from the owner
+    timezone: str = ""             # e.g. "Asia/Jakarta"; default: the machine's
+    context_tokens: int = 64000    # compress older messages beyond ~80% of this
+    keep_recent: int = 10          # messages kept word-for-word when compressing
+    memory: bool = True            # long-term memory + saved sessions
     http: bool = True              # http_get, web_extract, web_search
     search: str = "auto"           # auto | duckduckgo | brave | tavily | searxng
     terminal: bool = False         # run shell commands on this machine
@@ -95,6 +99,8 @@ class Settings:
         return cls(
             workspace=str(a.get("workspace", "")), max_steps=int(a.get("max_steps", 12)),
             max_tokens=int(a.get("max_tokens", 1536)), instructions=str(a.get("instructions", "")),
+            timezone=str(a.get("timezone", "")), context_tokens=int(a.get("context_tokens", 64000)),
+            keep_recent=int(a.get("keep_recent", 10)), memory=bool(a.get("memory", True)),
             http=bool(t.get("http", True)), search=str(t.get("search", "auto")),
             terminal=bool(t.get("terminal", False)), code=(None if t.get("code") is None else bool(t["code"])),
             confirm=bool(t.get("confirm", True)), timeout=int(t.get("timeout", 180)),

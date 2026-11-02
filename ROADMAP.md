@@ -37,20 +37,31 @@ the config obvious, and every stage runnable by someone who just `git clone`d it
 - `smooth-agent setup`, `doctor`, `skills list/search/install/remove`.
 - Smooth Agent's own skills: `smooth-agent` (configuration guide), `native-mcp`.
 
-## Stage 3 — Memory + scheduling (next)
+## Stage 3 — Memory + scheduling  ✅ (v0.4)
 
-- Long-term memory: typed notes (fact / preference / decision / finding /
-  blocker) with full-text recall, injected into each turn; `memory` tool.
-- Session history saved and searchable (`session_search`); resume a session.
-- Context compression for long conversations.
-- Durable job queue + cron (`cronjob` tool, `smooth-agent cron add/list/remove`,
-  `smooth-agent daemon`): scheduled agent runs that survive restarts and retry.
-- `clarify` tool (ask the owner a question with options).
+- One SQLite database (`~/.smooth-agent/smooth.db`, WAL, FTS5).
+- Long-term memory: typed notes (user / preference / decision / finding /
+  blocker / note), pinned + relevant ones recalled into every turn; `memory`
+  tool and `smooth-agent memory`.
+- Every session saved; `session_search` tool, `smooth-agent sessions`,
+  `run --resume`.
+- Context compression: older messages summarised, tool calls never split from
+  their results.
+- Durable job queue with leases and retries; schedules (cron, `every 2h`,
+  `daily 09:00`, `at …`) in the owner's timezone; `cronjob` tool,
+  `smooth-agent cron`, `jobs`, `daemon`; script watchers (no model call when
+  nothing changed) and the `[SILENT]` reply.
+- `clarify` tool.
 
-## Stage 4 — Channels + packaging
+## Stage 4 — Channels + installer (next)
 
-- Chat channels for one owner: Telegram first, then WhatsApp / Discord / Slack
-  as plugins (`send_message` tool, owner-only access, approvals by button).
+- Chat channels for one owner, picked during setup: Telegram, WhatsApp and
+  WeChat first, then Discord, Slack, Signal, Matrix, LINE, Feishu/Lark, MS
+  Teams, Google Chat, email, SMS and more (`send_message` tool, owner-only
+  access, approvals by button, cron results delivered to a channel).
+- A good-looking installer: one-line install script with a Smooth Agent banner,
+  colours and clear steps; channel choices in `smooth-agent setup`.
+- A polished GitHub page: banner, badges, screenshots.
 - `smooth-agent daemon` runs channels + cron as a service (systemd unit, launchd plist).
 - Docker image, `pipx install`, one-command install script.
 

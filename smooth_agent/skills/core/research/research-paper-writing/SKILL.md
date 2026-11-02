@@ -2195,13 +2195,12 @@ for paper in results:
 
 ### State Management with `memory` and `todo`
 
-**`memory` tool** — persist key decisions (bounded: ~2200 chars for MEMORY.md):
+**`memory` tool** — persist key decisions (one short fact per memory; they are recalled automatically in later sessions):
 
 ```
-memory("add", "Paper: autoreason. Venue: NeurIPS 2025 (9 pages). 
-  Contribution: structured refinement works when generation-evaluation gap is wide.
-  Key results: Haiku 42/42, Sonnet 3/5, S4.6 constrained 2/3.
-  Status: Phase 5 — drafting Methods section.")
+memory(action="add", kind="decision", content="Paper autoreason targets NeurIPS 2025 (9 pages); contribution: structured refinement works when the generation-evaluation gap is wide.")
+memory(action="add", kind="finding", content="autoreason results: Haiku 42/42, Sonnet 3/5, S4.6 constrained 2/3.")
+memory(action="add", kind="blocker", content="autoreason status: Phase 5, drafting the Methods section.")
 ```
 
 Update memory after major decisions or phase transitions. This persists across sessions.
@@ -2209,17 +2208,17 @@ Update memory after major decisions or phase transitions. This persists across s
 **`todo` tool** — track granular progress:
 
 ```
-todo("add", "Design constrained task experiments for Sonnet 4.6")
-todo("add", "Run Haiku baseline comparison")
-todo("add", "Draft Methods section")
-todo("update", id=3, status="in_progress")
-todo("update", id=1, status="completed")
+todo(todos=[{"id": "1", "content": "Design constrained task experiments for Sonnet 4.6", "status": "pending"},
+            {"id": "2", "content": "Run Haiku baseline comparison", "status": "pending"},
+            {"id": "3", "content": "Draft Methods section", "status": "pending"}])
+todo(todos=[{"id": "3", "content": "Draft Methods section", "status": "in_progress"}], merge=True)
+todo(todos=[{"id": "1", "content": "Design constrained task experiments for Sonnet 4.6", "status": "completed"}], merge=True)
 ```
 
 **Session startup protocol:**
 ```
-1. todo("list")                           # Check current task list
-2. memory("read")                         # Recall key decisions
+1. todo()                                 # Check current task list
+2. memory(action="list", kind="decision") # Recall key decisions (relevant ones are also recalled automatically)
 3. terminal("git log --oneline -10")      # Check recent commits
 4. terminal("ps aux | grep python")       # Check running experiments
 5. terminal("ls results/ | tail -20")     # Check for new results
@@ -2231,30 +2230,25 @@ todo("update", id=1, status="completed")
 Use the `cronjob` tool to schedule periodic experiment checks:
 
 ```
-cronjob("create", {
-  "schedule": "*/30 * * * *",  # Every 30 minutes
-  "prompt": "Check experiment status:
+cronjob(action="create", name="experiment-check", schedule="*/30 * * * *",  # every 30 minutes
+  prompt="Check experiment status:
     1. ps aux | grep run_experiment
     2. tail -30 logs/experiment_haiku.log
     3. ls results/haiku_baselines/
     4. If complete: read results, compute Borda scores, 
        git add -A && git commit -m 'Add Haiku results' && git push
     5. Report: table of results, key finding, next step
-    6. If nothing changed: respond with [SILENT]"
-})
+    6. If nothing changed: respond with [SILENT]")
 ```
 
 **[SILENT] protocol**: When nothing has changed since the last check, respond with exactly `[SILENT]`. This suppresses notification delivery to the user. Only report when there are genuine changes worth knowing about.
 
 **Deadline tracking**:
 ```
-cronjob("create", {
-  "schedule": "0 9 * * *",  # Daily at 9am
-  "prompt": "NeurIPS 2025 deadline: May 22. Today is {date}. 
-    Days remaining: {compute}. 
-    Check todo list — are we on track? 
-    If <7 days: warn user about remaining tasks."
-})
+cronjob(action="create", name="deadline", schedule="daily 09:00",
+  prompt="NeurIPS 2025 deadline: May 22. Work out today's date and the days remaining.
+    Check the todo list — are we on track?
+    If fewer than 7 days remain: warn the owner about the remaining tasks.")
 ```
 
 ### Communication Patterns

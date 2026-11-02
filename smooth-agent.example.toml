@@ -22,6 +22,10 @@ model = "deepseek-chat"       # MODEL
 max_steps = 12                        # tool rounds per message
 max_tokens = 1536
 # instructions = "Answer in Indonesian. Keep replies short."
+# timezone = "Asia/Jakarta"          # for schedules and "tomorrow at 9" (default: this machine's)
+memory = true                         # long-term memory + saved, searchable sessions
+context_tokens = 64000                # older messages are summarised beyond ~80% of this
+keep_recent = 10                      # messages kept word-for-word when summarising
 
 [tools]
 http = true            # web_search, web_extract, http_get

@@ -29,6 +29,8 @@ class Runtime:
     settings: Settings
     config: dict[str, Any]
     home: Path
+    store: Any = None
+    memory: Any = None
     warnings: list[str] = field(default_factory=list)
     _closers: list[Callable[[], None]] = field(default_factory=list)
 
@@ -47,9 +49,16 @@ class Runtime:
         self.close()
 
 
+def new_session_id(prefix: str = "") -> str:
+    import time
+    import uuid
+    return f"{prefix}{time.strftime('%Y%m%d-%H%M%S')}-{uuid.uuid4().hex[:6]}"
+
+
 def build_runtime(config_path: str | None = None, *, approver: Approver | None = None, provider: str | None = None,
                   workspace: str | None = None, max_steps: int | None = None, overrides: dict[str, Any] | None = None,
-                  connect_mcp: bool = True) -> Runtime:
+                  connect_mcp: bool = True, ask: Any = None, session_id: str | None = None, channel: str = "cli",
+                  model: str | None = None) -> Runtime:
     home = ensure_home()
     load_dotenv(home / ".env")
     cfg = load_config(config_path)
@@ -97,16 +106,49 @@ def build_runtime(config_path: str | None = None, *, approver: Approver | None =
             mgr.register(reg, needs_approval=bool(mcp_cfg.get("confirm", False)))
             warnings += [f"MCP server '{n}' did not start: {e}" for n, e in mgr.errors.items()]
 
+    store = mem = None
+    sid = session_id or new_session_id()
+    if st.memory:
+        from .interact import add_session_tools
+        from .memory import Memory, add_memory_tool
+        from .scheduler import Crons, Jobs, add_cron_tool
+        from .store import Store
+        store = Store(home / "smooth.db")
+        store.new_session(sid, channel=channel)
+        mem = Memory(store)
+        add_memory_tool(reg, mem, session_id=sid)
+        rt_ref: dict[str, Any] = {}
+        add_session_tools(reg, store, lambda: rt_ref["agent"].session_id if "agent" in rt_ref else sid)
+        add_cron_tool(reg, Crons(store, st.timezone or None), Jobs(store), home, scripts_allowed=st.terminal)
+    from .interact import add_clarify_tool
+    add_clarify_tool(reg, ask)
+
     lib = None
     if st.skills:
         lib = SkillLibrary(workspace=ws.root, extra_dirs=[Path(d) for d in st.skill_dirs],
                            optional=st.optional_skills, enabled=set(st.enable_skills))
     system = DEFAULT_SYSTEM + (f"\n\nOwner instructions:\n{st.instructions}" if st.instructions else "")
+    system += _clock(st.timezone)
     agent = Agent(router, reg, system=system, provider=provider, max_steps=max_steps or st.max_steps,
                   max_tokens=st.max_tokens, skills=lib, delegate=st.delegate, delegate_steps=st.delegate_steps,
-                  processes=pm)
+                  processes=pm, store=store, memory=mem, session_id=sid, context_tokens=st.context_tokens,
+                  keep_recent=st.keep_recent, model=model)
+    if st.memory:
+        rt_ref["agent"] = agent
     return Runtime(agent=agent, router=router, registry=reg, workspace=ws, settings=st, config=cfg, home=home,
-                   warnings=warnings, _closers=closers)
+                   store=store, memory=mem, warnings=warnings, _closers=closers)
+
+
+def _clock(tz_name: str) -> str:
+    """Today's date and the timezone, so 'tomorrow 9am' and schedules come out right (date only: keeps the prompt cacheable)."""
+    from datetime import datetime
+    from .schedule import get_tz
+    try:
+        tz = get_tz(tz_name or None)
+    except Exception:
+        tz = get_tz(None)
+    now = datetime.now(tz)
+    return f"\n\nToday is {now:%A %Y-%m-%d}; the owner's timezone is {tz_name or now.strftime('%Z') or 'local'} (UTC{now:%z})."
 
 
 __all__ = ["Runtime", "build_runtime", "find_config"]
