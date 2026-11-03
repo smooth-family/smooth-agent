@@ -67,6 +67,7 @@ CREATE TABLE IF NOT EXISTS crons (
 
 MIGRATIONS = (
     "ALTER TABLE crons ADD COLUMN script TEXT DEFAULT ''",
+    "ALTER TABLE crons ADD COLUMN watch TEXT DEFAULT ''",
 )
 
 

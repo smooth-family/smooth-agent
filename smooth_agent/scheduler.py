@@ -40,11 +40,11 @@ class Crons:
         self.tz = tz
 
     def create(self, name: str, schedule: str, prompt: str, *, repeat: int = 0, deliver: str = "",
-               skills: list[str] | None = None, model: str = "", script: str = "") -> dict:
+               skills: list[str] | None = None, model: str = "", script: str = "", watch: dict | None = None) -> dict:
         name = str(name or "").strip()
         if not NAME_OK.match(name):
             raise ToolError("name: letters, digits, '.', '_' or '-' (max 64), starting with a letter or digit")
-        if not str(prompt or "").strip() and not str(script or "").strip():
+        if not str(prompt or "").strip() and not str(script or "").strip() and not watch:
             raise ToolError("give a prompt (what the agent should do) and/or a script (a command to run)")
         try:
             sched = parse(schedule)
@@ -58,9 +58,10 @@ class Crons:
         if sched.kind == "once":
             repeat = 1
         with self.s.tx() as c:
-            c.execute("INSERT INTO crons (name, schedule, prompt, enabled, repeat, runs, deliver, skills, model, next_run, created, script) "
-                      "VALUES (?,?,?,1,?,0,?,?,?,?,?,?)", (name, schedule, prompt or "", int(repeat or 0), deliver or "",
-                                                           json.dumps(skills or []), model or "", nxt, time.time(), script or ""))
+            c.execute("INSERT INTO crons (name, schedule, prompt, enabled, repeat, runs, deliver, skills, model, next_run, created, script, watch) "
+                      "VALUES (?,?,?,1,?,0,?,?,?,?,?,?,?)", (name, schedule, prompt or "", int(repeat or 0), deliver or "",
+                                                             json.dumps(skills or []), model or "", nxt, time.time(), script or "",
+                                                             json.dumps(watch) if watch else ""))
         return self.get(name)
 
     def get(self, name: str) -> dict:
@@ -221,7 +222,16 @@ class Scheduler:
             prompt = f"Before you start, load and follow these skills with skill_view: {', '.join(skills)}.\n\n{prompt}"
         self.log(f"cron {name}: running (job {job['id']}, attempt {job['attempts']})")
         try:
-            if cr.get("script"):
+            if cr.get("watch"):
+                from .watch import run_watch
+                changed, report = run_watch(self.store, cr)
+                if not changed:
+                    result = SILENT  # same as last time: no model call, nothing sent
+                elif cr["prompt"].strip():
+                    result = self.run_fn(f"{prompt}\n\nA web page you watch changed:\n{report}", cr)
+                else:
+                    result = report
+            elif cr.get("script"):
                 code, output = run_script(cr["script"], self.home)
                 if code not in (0, None) and not output.strip():
                     raise RuntimeError(f"script exited {code}")

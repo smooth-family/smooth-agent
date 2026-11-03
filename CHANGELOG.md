@@ -1,5 +1,22 @@
 # Changelog
 
+## 0.8.0 — connected services
+
+- `http_request`: any API with method, headers, query and JSON; secrets as `{{env:NAME}}`,
+  filled in at the last moment and never shown to the model; writes ask first.
+- Email: `email_search`, `email_read` (attachments saved to the workspace, HTML mail as
+  text, not marked read), `email_send` (attachments, reply in the thread). IMAP/SMTP
+  presets for Gmail, Outlook, Yahoo, iCloud and Zoho. Sending asks first.
+- `git` without the terminal (status/log/diff/show/branch free; add/commit/pull/push/
+  checkout/clone ask first; no option injection; GitHub token passed in the environment,
+  never written to `.git/config` or the command line).
+- `github`: repo, issues, PRs with files and diff, search, notifications; create issue /
+  PR, comment, close / reopen (ask first).
+- `sql_query`: read-only SQLite.
+- `web_watch`: watch a page or JSON API (regex `select`, `json_path`); the scheduler
+  compares snapshots and delivers a diff only when it changes — no model call otherwise.
+- `doctor` shows email and GitHub status.
+
 ## 0.7.0 — every channel works like Telegram
 
 - **Files and voice in** on WhatsApp, Slack, Matrix, LINE and Discord: photos, documents,

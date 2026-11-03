@@ -4,7 +4,7 @@
 
 <p align="center">
   <a href="https://github.com/smooth-family/smooth-agent/actions/workflows/ci.yml"><img src="https://github.com/smooth-family/smooth-agent/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
-  <img src="https://img.shields.io/badge/version-0.7.0-5b8cff" alt="version 0.7.0">
+  <img src="https://img.shields.io/badge/version-0.8.0-5b8cff" alt="version 0.8.0">
   <img src="https://img.shields.io/badge/python-3.9%2B-3776AB?logo=python&logoColor=white" alt="Python 3.9+">
   <img src="https://img.shields.io/badge/channels-7-b65cff" alt="7 chat channels">
   <img src="https://img.shields.io/badge/docker-ready-2496ED?logo=docker&logoColor=white" alt="Docker">
@@ -204,6 +204,33 @@ with `create_document`, and sends it with `send_file` — images arrive as photo
 (`[stt]`: OpenAI, Groq, a local whisper server or a gateway) on every two-way channel; with
 `voice_replies = "auto"` a voice note gets the answer as text *and* as a voice note
 (`[tts]`, ffmpeg). Code and links are left out of the spoken version.
+
+## Connected services
+
+Built-in tools, no extra packages, nothing to install:
+
+| Tool | What it does | Asks you first |
+|---|---|---|
+| `http_request` | any HTTP API: method, headers, query, JSON | POST / PUT / PATCH / DELETE |
+| `email_search` · `email_read` · `email_send` | your mailbox over IMAP + SMTP: find, read (attachments saved to the workspace), send and reply in the thread | sending |
+| `git` | status, log, diff, show, branches — and add, commit, pull, push, checkout, clone | anything that changes a repo |
+| `github` | repo info, issues, PRs (with diff), search, notifications; open issues and PRs, comment, close | anything written on GitHub |
+| `sql_query` | read-only SQLite (app data, exports) | — |
+| `web_watch` | check a page or JSON API every N minutes and tell you **only when it changes** (no model call meanwhile) | — |
+
+Secrets stay out of the model: write `{{env:NOTION_TOKEN}}` in a request and the
+value is filled in at the last moment; the email password and `GITHUB_TOKEN` come
+from `~/.smooth-agent/.env`; every result is redacted.
+
+```toml
+[email]
+user = "you@gmail.com"     # Gmail, Outlook, Yahoo, iCloud, Zoho: hosts are known
+# password: EMAIL_PASSWORD=<app password> in ~/.smooth-agent/.env
+```
+
+Ask in chat: *"any unread email from the bank this week?"*, *"reply to that one
+and attach the sheet"*, *"what changed in PR #12?"*, *"tell me when the price on
+this page drops"*.
 
 ## Persona files
 

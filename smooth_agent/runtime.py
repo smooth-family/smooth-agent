@@ -87,6 +87,9 @@ def build_runtime(config_path: str | None = None, *, approver: Approver | None =
     if st.terminal:
         add_process_tools(reg, pm)
 
+    from .connect import add_connect_tools
+    add_connect_tools(reg, ws, cfg, http=st.http)  # http_request, github, git, sql_query, email (when [email] is set)
+
     from .media import MediaSettings, add_media_tools, describe
     ms = MediaSettings.from_config(cfg)
     add_media_tools(reg, router, ws, ms)
@@ -129,7 +132,11 @@ def build_runtime(config_path: str | None = None, *, approver: Approver | None =
         add_memory_tool(reg, mem, session_id=sid)
         rt_ref: dict[str, Any] = {}
         add_session_tools(reg, store, lambda: rt_ref["agent"].session_id if "agent" in rt_ref else sid)
-        add_cron_tool(reg, Crons(store, st.timezone or None), Jobs(store), home, scripts_allowed=st.terminal)
+        crons, jobs = Crons(store, st.timezone or None), Jobs(store)
+        add_cron_tool(reg, crons, jobs, home, scripts_allowed=st.terminal)
+        if st.http:
+            from .watch import add_watch_tool
+            add_watch_tool(reg, crons, jobs)
     from .interact import add_clarify_tool
     add_clarify_tool(reg, ask)
 

@@ -94,6 +94,13 @@ Still to do:
 Still to do: Signal, MS Teams, Google Chat, Feishu/Lark, Mattermost, email, SMS; live progress
 messages on channels that can edit messages (Slack, Discord, Matrix).
 
+## Stage 7 — Connected services  ✅ (v0.8.0)
+
+- `http_request` (secrets via `{{env:NAME}}`), email (IMAP search/read, SMTP send and reply),
+  `git` and `github` without a terminal, read-only `sql_query`, `web_watch` (change-only alerts).
+
+Still to do: calendar (CalDAV / Google), Postgres/MySQL read-only, Notion / Google Drive helpers.
+
 ## Later
 
 - Desktop control (computer use).

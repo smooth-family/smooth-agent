@@ -410,6 +410,12 @@ def _cmd_doctor(args) -> int:
     print(f"{ok(st.http)} web tools   search backend: {st.search}")
     print(f"{ok(st.terminal)} terminal    {'on' if st.terminal else 'off'} (confirm={'yes' if st.confirm else 'no'})")
     print(f"{ok(bs.enabled and available())} browser     {'on' if bs.enabled else 'off'}; playwright {'installed' if available() else 'missing'}")
+    from .connect import EmailSettings
+    es = EmailSettings.from_config(cfg)
+    print(f"{ok(es.configured)} email       " + (f"{es.user} via {es.imap_host}" if es.configured else "off (set [email] user + EMAIL_PASSWORD)"))
+    gh_env = str((cfg.get("github") or {}).get("token_env") or "GITHUB_TOKEN")
+    print(f"{ok(bool(os.environ.get(gh_env)))} github      " + (f"{gh_env} set" if os.environ.get(gh_env) else f"no {gh_env} (public reads only)")
+          + f"; git {'installed' if shutil.which('git') else 'missing'}")
     from .skills import SkillLibrary
     lib = SkillLibrary(optional=st.optional_skills, enabled=set(st.enable_skills))
     missing = sorted({b for s in lib.available() for b in s.missing_bins})

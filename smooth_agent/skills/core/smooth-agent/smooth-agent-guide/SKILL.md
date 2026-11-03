@@ -61,6 +61,16 @@ provider = "main"
 model = "gpt-image-1"
 ```
 
+## Connected services (built in)
+
+- `http_request` — any API; secrets as `{{env:NAME}}` (filled in, never shown). Non-GET asks first.
+- `email_search` / `email_read` / `email_send` — `[email] user` + `EMAIL_PASSWORD` (an app
+  password). Gmail, Outlook, Yahoo, iCloud and Zoho need nothing else. Sending asks first.
+- `git` (no terminal needed) and `github` (issues, PRs, search) — `GITHUB_TOKEN` in `.env`.
+  Commits, pushes and anything written on GitHub ask first.
+- `sql_query` — read-only SQLite.
+- `web_watch` — check a page / JSON API every N minutes; you hear only when it changes.
+
 ## Skills
 
 `smooth-agent skills list|search <words>|install <name|git-url|path>|remove <name>`.
