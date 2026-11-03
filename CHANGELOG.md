@@ -1,5 +1,39 @@
 # Changelog
 
+## 0.10.0 — more connectors
+
+- **Calendar** (`calendar`): the owner's Google Calendar (OAuth token) or any CalDAV server
+  (Fastmail, Nextcloud, iCloud, …). `agenda` (upcoming events), `search`, and `create` (asks first).
+- **Notion** (`notion`): `search` pages and databases, read a page's text, query a database; `append`
+  a paragraph (asks first). Uses an internal integration token shared with the pages.
+- **Google Drive** (`gdrive`): `list` / `search` files and `read` one as text — Google Docs, Sheets
+  and Slides are exported to text/CSV, and text files are read as is.
+- **`sql_query` now also reads Postgres and MySQL**, read-only, through configured `[sql.<name>]`
+  connections (pure-Python `pg8000` / `pymysql`, installed as the `postgres` / `mysql` extras). Only
+  SELECT / WITH / SHOW / EXPLAIN / DESCRIBE run, one statement at a time; empty sql lists the tables.
+- Reads never ask; the only new approvals are the two writes above, and `[tools] confirm = false`
+  silences those too.
+- Telegram replies render more tidily: Markdown tables become aligned lines, bullets become •, and
+  `*italic*`, `__bold__`, `~~strike~~` and `> quotes` are converted (code spans and `snake_case` left
+  untouched).
+- **New skills** that put the connectors and workflows to work: `daily-briefing`, `inbox-triage`,
+  `calendar-assistant`, `meeting-notes` (productivity, core) and `airdrop-tracker` (blockchain,
+  optional — tracks the owner's own wallets with change alerts and claim-page safety checks).
+
+## 0.9.0 — workflows
+
+- **Named workflows**: save a multi-step task once as a playbook with `{{parameters}}`, then run it
+  by name or on a schedule. `workflow` tool (create / list / show / update / remove / run) and
+  `smooth-agent workflow add | list | show | run | remove`.
+- Parameters are declared (name, optional description, optional default, required by default unless a
+  default is given). Every `{{placeholder}}` in the steps must be a declared parameter, checked when
+  the workflow is saved; required values are checked before a run starts an agent.
+- Run on demand — queued to the daemon from the `workflow` tool, or run inline by the CLI so it works
+  without a daemon — or on a schedule: `cronjob` / `cron add … --workflow <name>` runs a saved
+  workflow, with the cron's own prompt appended as extra context.
+- Workflows live in the one SQLite database; each run is counted, its output saved and delivered just
+  like a scheduled job.
+
 ## 0.8.0 — connected services
 
 - `http_request`: any API with method, headers, query and JSON; secrets as `{{env:NAME}}`,

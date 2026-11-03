@@ -781,16 +781,128 @@ def sql_query(path: Path, sql: str, limit: int = 200) -> str:
         con.close()
 
 
-def add_sql_tool(reg: Registry, ws: Workspace) -> None:
+# ---------------------------------------------------------------- Postgres / MySQL (read-only)
+
+READONLY_SQL = re.compile(r"^\s*(select|with|show|explain|desc|describe|table)\b", re.I)
+
+
+@dataclass
+class SqlConn:
+    name: str
+    backend: str  # "postgres" | "mysql"
+    host: str = "localhost"
+    port: int = 0
+    user: str = ""
+    password: str = ""
+    database: str = ""
+
+
+def sql_connections(cfg: dict[str, Any], env: dict[str, str] | None = None) -> dict[str, SqlConn]:
+    """Named read-only database connections from [sql.<name>] (url + optional password_env)."""
+    env = env if env is not None else dict(os.environ)
+    out: dict[str, SqlConn] = {}
+    for name, c in (cfg.get("sql") or {}).items():
+        if not isinstance(c, dict) or not c.get("url"):
+            continue
+        u = urllib.parse.urlparse(str(c["url"]))
+        backend = "postgres" if u.scheme.startswith(("postgres", "pg")) else ("mysql" if u.scheme.startswith("mysql") else "")
+        if not backend:
+            continue
+        pw = str(c.get("password") or (env.get(str(c["password_env"]), "") if c.get("password_env") else "") or
+                 (urllib.parse.unquote(u.password) if u.password else ""))
+        out[str(name)] = SqlConn(name=str(name), backend=backend, host=u.hostname or "localhost",
+                                 port=u.port or (5432 if backend == "postgres" else 3306),
+                                 user=urllib.parse.unquote(u.username or ""), password=pw,
+                                 database=(u.path or "/").lstrip("/"))
+    return out
+
+
+def _guard_readonly(sql: str) -> str:
+    s = str(sql or "").strip().rstrip(";").strip()
+    if ";" in s:
+        raise ToolError("run one statement at a time (no ';')")
+    if not READONLY_SQL.match(s):
+        raise ToolError("read-only: only SELECT / WITH / SHOW / EXPLAIN / DESCRIBE are allowed")
+    return s
+
+
+def _open_remote(conn: SqlConn):  # pragma: no cover - exercised with a fake in tests
+    if conn.backend == "postgres":
+        try:
+            import pg8000.dbapi as driver
+        except ImportError:
+            raise ToolError("Postgres needs the pg8000 driver: pip install \"smooth-agent[postgres]\"") from None
+        return driver.connect(user=conn.user, password=conn.password, host=conn.host, port=conn.port,
+                              database=conn.database or None)
+    try:
+        import pymysql as driver  # type: ignore
+    except ImportError:
+        raise ToolError("MySQL needs the PyMySQL driver: pip install \"smooth-agent[mysql]\"") from None
+    return driver.connect(host=conn.host, port=conn.port, user=conn.user, password=conn.password,
+                          database=conn.database or None, read_default_file="")
+
+
+def remote_query(conn: SqlConn, sql: str, limit: int = 200, *, opener=_open_remote) -> str:
+    con = opener(conn)
+    try:
+        cur = con.cursor()
+        if conn.backend == "postgres":
+            cur.execute("SET TRANSACTION READ ONLY")
+        else:
+            cur.execute("SET SESSION TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY")
+        if not str(sql or "").strip():
+            if conn.backend == "postgres":
+                cur.execute("SELECT table_schema||'.'||table_name FROM information_schema.tables "
+                            "WHERE table_schema NOT IN ('pg_catalog','information_schema') ORDER BY 1")
+            else:
+                cur.execute("SHOW TABLES")
+            names = [str(r[0]) for r in cur.fetchall()]
+            return "\n".join(names) or "(no tables)"
+        cur.execute(_guard_readonly(sql))
+        if cur.description is None:
+            return "(no rows)"
+        cols = [d[0] for d in cur.description]
+        n = max(1, min(int(limit or 200), 2000))
+        rows = cur.fetchmany(n + 1)
+        more = len(rows) > n
+        rows = rows[:n]
+        cell = lambda v: "" if v is None else (f"<{len(v)} bytes>" if isinstance(v, (bytes, bytearray)) else str(v).replace("\t", " ").replace("\n", " ")[:300])
+        lines = ["\t".join(cols)] + ["\t".join(cell(v) for v in r) for r in rows]
+        return redact(_cap("\n".join(lines), SHOW_CHARS)) + ("\n...(more rows; raise limit or add LIMIT/WHERE)" if more else f"\n({len(rows)} rows)")
+    except ToolError:
+        raise
+    except Exception as e:  # driver-specific errors: surface the message, not a traceback
+        raise ToolError(f"SQL error: {str(e)[:300]}") from None
+    finally:
+        try:
+            con.close()
+        except Exception:
+            pass
+
+
+def add_sql_tool(reg: Registry, ws: Workspace, cfg: dict[str, Any] | None = None) -> None:
+    conns = sql_connections(cfg or {})
+    names = ", ".join(sorted(conns)) or "none configured"
+
     @reg.tool(
         "sql_query",
-        "Query a SQLite database file read-only (.db, .sqlite — app data, exports, logs). Empty sql = list the tables "
-        "with their columns and row counts. Results are tab-separated (limit, default 200). Nothing can be changed.",
-        {"type": "object", "properties": {"path": {"type": "string"}, "sql": {"type": "string"},
-                                          "limit": {"type": "integer"}}, "required": ["path"]},
+        "Query a database read-only. A SQLite file: give path (.db/.sqlite); empty sql lists its tables with columns "
+        f"and row counts. A configured Postgres/MySQL connection: give connection ({names}); empty sql lists its "
+        "tables. Only SELECT / WITH / SHOW / EXPLAIN / DESCRIBE run, one statement at a time. Tab-separated (limit, "
+        "default 200). Nothing can be changed.",
+        {"type": "object", "properties": {"path": {"type": "string"}, "connection": {"type": "string"},
+                                          "sql": {"type": "string"}, "limit": {"type": "integer"}}},
     )
     def _sql(args: dict[str, Any]) -> str:
-        return sql_query(ws.resolve(str(args.get("path") or "")), str(args.get("sql") or ""), int(args.get("limit") or 200))
+        name = str(args.get("connection") or "").strip()
+        sql, limit = str(args.get("sql") or ""), int(args.get("limit") or 200)
+        if name:
+            if name not in conns:
+                raise ToolError(f"no connection '{name}' (configured: {names})")
+            return remote_query(conns[name], sql, limit)
+        if not str(args.get("path") or "").strip():
+            raise ToolError("give a SQLite path, or a configured connection for Postgres/MySQL")
+        return sql_query(ws.resolve(str(args["path"])), sql, limit)
 
 
 # ---------------------------------------------------------------- wiring
@@ -805,7 +917,10 @@ def add_connect_tools(reg: Registry, ws: Workspace, cfg: dict[str, Any], *, http
         add_github_tool(reg, token_env=token_env, api=str(gh_cfg.get("api") or "https://api.github.com"))
         notes.append(f"github: {'token set' if os.environ.get(token_env) else 'no token (public reads only)'}")
     add_git_tool(reg, ws, token_env=token_env)
-    add_sql_tool(reg, ws)
+    add_sql_tool(reg, ws, cfg)
+    sc = sql_connections(cfg)
+    if sc:
+        notes.append("sql: " + ", ".join(sorted(sc)))
     es = EmailSettings.from_config(cfg)
     if es.configured:
         add_email_tools(reg, ws, es)
@@ -815,4 +930,5 @@ def add_connect_tools(reg: Registry, ws: Workspace, cfg: dict[str, Any], *, http
 
 __all__ = ["add_connect_tools", "add_http_request_tool", "add_email_tools", "add_git_tool", "add_github_tool",
            "add_sql_tool", "http_request", "fill_env", "EmailSettings", "Mailbox", "GitHub", "github_action",
-           "github_write", "git_argv", "run_git", "sql_query", "send_mail", "message_text"]
+           "github_write", "git_argv", "run_git", "sql_query", "send_mail", "message_text",
+           "sql_connections", "remote_query", "SqlConn", "_guard_readonly"]

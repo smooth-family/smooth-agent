@@ -129,6 +129,26 @@ class RenderTests(unittest.TestCase):
         self.assertIn("<b>Judul</b>", html)
         self.assertEqual(md_to_html("2 ** 3 = 8"), "2 ** 3 = 8")
 
+    def test_md_to_html_tidy(self):
+        # bullets, italics, strike, blockquote
+        self.assertEqual(md_to_html("- a\n- b"), "• a\n• b")
+        self.assertEqual(md_to_html("* a\n+ b"), "• a\n• b")
+        self.assertEqual(md_to_html("pakai *miring*"), "pakai <i>miring</i>")
+        self.assertEqual(md_to_html("ini _juga_ ok"), "ini <i>juga</i> ok")
+        self.assertEqual(md_to_html("__tebal__"), "<b>tebal</b>")
+        self.assertEqual(md_to_html("~~coret~~"), "<s>coret</s>")
+        self.assertEqual(md_to_html("> kutipan"), "▎ kutipan")
+        # Markdown table -> tidy lines, header bold, separator dropped
+        t = md_to_html("| Name | Age |\n|------|-----|\n| Bob | 30 |\n| Ana | 25 |")
+        self.assertIn("<b>Name · Age</b>", t)
+        self.assertIn("Bob · 30", t)
+        self.assertNotIn("---", t)
+        # must NOT touch snake_case, paths, math, or code spans
+        self.assertEqual(md_to_html("file_name_here"), "file_name_here")
+        self.assertEqual(md_to_html("a_b_c_d"), "a_b_c_d")
+        self.assertEqual(md_to_html("1 * 2 * 3"), "1 * 2 * 3")
+        self.assertEqual(md_to_html("`- not a bullet`"), "<code>- not a bullet</code>")
+
     def test_balance_fences(self):
         parts = balance_fences(["intro\n```py\na = 1", "b = 2\n```\nend"])
         self.assertTrue(parts[0].endswith("```"))

@@ -416,6 +416,15 @@ def _cmd_doctor(args) -> int:
     gh_env = str((cfg.get("github") or {}).get("token_env") or "GITHUB_TOKEN")
     print(f"{ok(bool(os.environ.get(gh_env)))} github      " + (f"{gh_env} set" if os.environ.get(gh_env) else f"no {gh_env} (public reads only)")
           + f"; git {'installed' if shutil.which('git') else 'missing'}")
+    from .services import CalendarSettings
+    from .connect import sql_connections
+    cal = CalendarSettings.from_config(cfg)
+    print(f"{ok(cal.configured)} calendar    " + (f"{cal.kind}" if cal.configured else "off (set [calendar])"))
+    print(f"{ok(bool(os.environ.get('NOTION_TOKEN')))} notion      " + ("NOTION_TOKEN set" if os.environ.get("NOTION_TOKEN") else "off (set NOTION_TOKEN)")
+          + f"; gdrive {'GOOGLE_TOKEN set' if os.environ.get('GOOGLE_TOKEN') else 'off'}")
+    sc = sql_connections(cfg)
+    if sc:
+        print(f"{ok(True)} sql         SQLite + connections: {', '.join(sorted(sc))}")
     from .skills import SkillLibrary
     lib = SkillLibrary(optional=st.optional_skills, enabled=set(st.enable_skills))
     missing = sorted({b for s in lib.available() for b in s.missing_bins})
@@ -732,19 +741,21 @@ def _cmd_cron(args) -> int:
             rows = crons.list()
             for r in rows:
                 runs = f"{r['runs']}/{r['repeat']}" if r["repeat"] else str(r["runs"])
+                what = r["prompt"] or (f"→ {r['workflow']}" if r.get("workflow") else "$ " + (r.get("script") or ""))
                 print(f"{r['name']:<20} {'on ' if r['enabled'] else 'off'} {r['schedule']:<20} next {fmt_time(r['next_run'], tz):<16} "
-                      f"runs {runs:<5} {r['last_status'] or '-':<5} {(r['prompt'] or '$ ' + (r.get('script') or ''))[:50]}")
+                      f"runs {runs:<5} {r['last_status'] or '-':<5} {what[:50]}")
             if not rows:
                 print('no cron jobs. add one:\n  smooth-agent cron add morning "daily 07:00" "Summarise the top tech news for me"')
             elif not DaemonLock.running(ensure_home()):
                 print("\nnote: the scheduler is not running — start it with `smooth-agent daemon` (or install it as a service).")
             return 0
         if action == "add":
-            if len(args.rest) < 3 and not (len(args.rest) == 2 and args.script):
-                return _err('usage: smooth-agent cron add <name> "<schedule>" "<prompt>" [--script CMD] [--repeat N] [--skill NAME]...')
+            if len(args.rest) < 3 and not (len(args.rest) == 2 and (args.script or args.workflow)):
+                return _err('usage: smooth-agent cron add <name> "<schedule>" "<prompt>" [--script CMD] [--workflow NAME] [--repeat N] [--skill NAME]...')
             name, schedule, prompt = args.rest[0], args.rest[1], " ".join(args.rest[2:])
             r = crons.create(name, schedule, prompt, repeat=args.repeat or 0, skills=args.skill or [],
-                             deliver=args.deliver or "", model=args.model or "", script=args.script or "")
+                             deliver=args.deliver or "", model=args.model or "", script=args.script or "",
+                             workflow=args.workflow or "")
             print(f"added '{name}' — {parse(schedule).describe()}, next run {fmt_time(r['next_run'], tz)}")
             if not DaemonLock.running(ensure_home()):
                 print("start the scheduler with: smooth-agent daemon")
@@ -792,6 +803,79 @@ def _run_job(args, prompt: str, cr: dict) -> str:
                             "then reply with the result the owner should read.")
         turn = rt.agent.run(prompt)
         return turn.text + (f"\n\n[stopped: {turn.stopped}]" if turn.stopped else "")
+
+
+def _cmd_workflow(args) -> int:
+    from .tools import ToolError
+    from .workflows import Workflows
+    wfs = Workflows(_store())
+    action = args.action or "list"
+    try:
+        if action == "list":
+            rows = wfs.list()
+            if not rows:
+                print('no workflows. add one:\n  smooth-agent workflow add greet "Say hello to {{name}}" --param name')
+                return 0
+            for w in rows:
+                spec = json.loads(w["params"] or "[]")
+                ps = ", ".join(p["name"] + ("" if p["required"] else "?") for p in spec) or "-"
+                print(f"{w['name']:<20} params: {ps:<24} runs {w['runs']:<4} {(w['description'] or w['steps'])[:44]}")
+            return 0
+        if action in ("show", "remove", "run") and not args.rest:
+            return _err(f"usage: smooth-agent workflow {action} <name>")
+        if action == "show":
+            w = wfs.get(args.rest[0])
+            spec = json.loads(w["params"] or "[]")
+            print(f"workflow: {w['name']}")
+            if w["description"]:
+                print(w["description"])
+            for p in spec:
+                tag = f"default: {p['default']}" if p["default"] is not None else ("required" if p["required"] else "optional")
+                print(f"  param {p['name']} ({tag})" + (f" — {p['description']}" if p["description"] else ""))
+            if json.loads(w["skills"] or "[]"):
+                print("skills: " + ", ".join(json.loads(w["skills"])))
+            if w["model"]:
+                print(f"model: {w['model']}")
+            print(f"runs: {w['runs']}\nsteps:\n{w['steps']}")
+            return 0
+        if action == "add":
+            if len(args.rest) < 2:
+                return _err('usage: smooth-agent workflow add <name> "<steps>" [--param NAME[=DEFAULT]]... [--skill NAME]...')
+            name, steps = args.rest[0], " ".join(args.rest[1:])
+            params = []
+            for p in (args.param or []):
+                n, sep, d = p.partition("=")
+                params.append({"name": n, "default": d} if sep else {"name": n})
+            wfs.create(name, steps, description=args.description or "", params=params,
+                       skills=args.skill or [], model=args.model or "")
+            print(f"added workflow '{name}'. run it with: smooth-agent workflow run {name}"
+                  + "".join(f" {p['name']}=…" for p in params))
+            return 0
+        if action == "remove":
+            if not wfs.remove(args.rest[0]):
+                return _err(f"no workflow '{args.rest[0]}'")
+            print(f"removed {args.rest[0]}")
+            return 0
+        if action == "run":
+            name = args.rest[0]
+            params = {}
+            for kv in args.rest[1:]:
+                k, sep, v = kv.partition("=")
+                if not sep:
+                    return _err(f"parameters are key=value; got '{kv}'")
+                params[k] = v
+            wfs.render(name, params)  # validate name + parameters before spinning up an agent
+            from .scheduler import Jobs, Scheduler
+            out: list[str] = []
+            sched = Scheduler(wfs.s, ensure_home(), lambda prompt, c: _run_job(args, prompt, c), tz=_tz(args),
+                              deliver=[lambda c, text, ok: out.append(text)], log=lambda m: print(m, file=sys.stderr))
+            Jobs(wfs.s).enqueue("workflow", {"name": name, "params": params}, priority=10)
+            sched.run_one()
+            print(out[0] if out else "(nothing to report)")
+            return 0
+    except ToolError as e:
+        return _err(str(e))
+    return _err("actions: list, show, add, remove, run")
 
 
 def _cmd_jobs(args) -> int:
@@ -1111,7 +1195,17 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--deliver", help="where to send the result (e.g. telegram)")
     sp.add_argument("--model", help="model for this job (default: the provider's)")
     sp.add_argument("--script", help="shell command run first; empty output = nothing to report (watchers)")
+    sp.add_argument("--workflow", help="run a saved workflow on this schedule (prompt may be empty)")
     sp.set_defaults(func=_cmd_cron)
+
+    sp = sub.add_parser("workflow", help="saved playbooks: list / show / add / remove / run")
+    sp.add_argument("action", nargs="?", choices=["list", "show", "add", "remove", "run"], default="list")
+    sp.add_argument("rest", nargs="*", help='add: <name> "<steps>"; run: <name> [key=value ...]; others: <name>')
+    sp.add_argument("--description", help="add: one line describing the workflow")
+    sp.add_argument("--param", action="append", metavar="NAME[=DEFAULT]", help="add: a parameter (repeatable)")
+    sp.add_argument("--skill", action="append", help="add: skill to load before the run (repeatable)")
+    sp.add_argument("--model", help="add: model for this workflow's runs")
+    sp.set_defaults(func=_cmd_workflow)
 
     sp = sub.add_parser("jobs", help="the job queue (scheduled runs and their results)")
     sp.add_argument("--state", choices=["queued", "running", "done", "failed"])

@@ -62,12 +62,19 @@ CREATE TABLE IF NOT EXISTS crons (
   model TEXT DEFAULT '', next_run REAL, last_run REAL, last_status TEXT DEFAULT '', created REAL,
   script TEXT DEFAULT ''
 );
+
+CREATE TABLE IF NOT EXISTS workflows (
+  name TEXT PRIMARY KEY, description TEXT DEFAULT '', steps TEXT NOT NULL, params TEXT DEFAULT '[]',
+  skills TEXT DEFAULT '[]', model TEXT DEFAULT '', runs INTEGER DEFAULT 0, created REAL, updated REAL
+);
 """
 
 
 MIGRATIONS = (
     "ALTER TABLE crons ADD COLUMN script TEXT DEFAULT ''",
     "ALTER TABLE crons ADD COLUMN watch TEXT DEFAULT ''",
+    # a cron can run a saved workflow by name instead of (or alongside) an inline prompt
+    "ALTER TABLE crons ADD COLUMN workflow TEXT DEFAULT ''",
 )
 
 

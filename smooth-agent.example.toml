@@ -70,6 +70,25 @@ headless = true
 # token_env = "GITHUB_TOKEN"
 # api = "https://api.github.com"  # GitHub Enterprise: https://github.example.com/api/v3
 
+# [calendar]           # the calendar tool — pick ONE of the two
+# type = "google"                 # Google Calendar: GOOGLE_TOKEN (an OAuth access token) in .env
+# calendar_id = "primary"
+# token_env = "GOOGLE_TOKEN"
+# type = "caldav"                 # or any CalDAV server (Fastmail, Nextcloud, iCloud, …)
+# url = "https://caldav.example.com/calendars/you/default/"
+# user = "you@example.com"
+# password_env = "CALDAV_PASSWORD"
+
+# [notion]             # the notion tool; share each page/database with the integration
+# token_env = "NOTION_TOKEN"      # an internal integration token, in .env
+
+# [gdrive]             # the gdrive tool
+# token_env = "GOOGLE_TOKEN"      # an OAuth access token with a Drive scope, in .env
+
+# [sql.analytics]      # a read-only Postgres/MySQL connection for sql_query (needs the postgres/mysql extra)
+# url = "postgresql://readonly@db.example.com:5432/analytics"
+# password_env = "ANALYTICS_DB_PASSWORD"
+
 [mcp]
 confirm = false        # ask before every MCP tool call
 # [mcp.servers.github]

@@ -185,8 +185,31 @@ def balance_fences(parts: list[str]) -> list[str]:
     return out
 
 
+def _md_table(seg: str) -> str:
+    """Turn GitHub-style Markdown tables into tidy lines (Telegram has no table tag).
+    A header row, a `|---|---|` separator, then body rows become 'a · b · c', header bold."""
+    import re
+    lines = seg.split("\n")
+    out, i = [], 0
+    sep = re.compile(r"^\s*\|?\s*:?-{2,}:?\s*(\|\s*:?-{2,}:?\s*)+\|?\s*$")
+    is_row = lambda s: s.strip().startswith("|") or ("|" in s and s.count("|") >= 2)
+    while i < len(lines):
+        if i + 1 < len(lines) and is_row(lines[i]) and sep.match(lines[i + 1]):
+            cells = lambda s: [c.strip() for c in s.strip().strip("|").split("|")]
+            out.append("<b>" + " · ".join(cells(lines[i])) + "</b>")
+            i += 2
+            while i < len(lines) and is_row(lines[i]):
+                out.append(" · ".join(cells(lines[i])))
+                i += 1
+        else:
+            out.append(lines[i])
+            i += 1
+    return "\n".join(out)
+
+
 def md_to_html(text: str) -> str:
-    """The Markdown chat models write -> Telegram HTML: code blocks, `code`, **bold**, [links](url), # headings."""
+    """The Markdown chat models write -> Telegram HTML: code blocks, `code`, **bold**, _italic_,
+    ~~strike~~, [links](url), # headings, bullets, tables and rules — so replies read tidily."""
     import html
     import re
     out = []
@@ -197,10 +220,24 @@ def md_to_html(text: str) -> str:
             out.append(f"<pre>{html.escape(code.strip(chr(10)))}</pre>")
             continue
         seg = html.escape(seg, quote=False)
-        seg = re.sub(r"`([^`\n]+)`", r"<code>\1</code>", seg)
-        seg = re.sub(r"\*\*(?=\S)(.+?)(?<=\S)\*\*", r"<b>\1</b>", seg)
+        # protect inline `code` spans from the formatting passes below
+        spans: list[str] = []
+        def _stash(m: "re.Match") -> str:
+            spans.append(m.group(1))
+            return f"\x00{len(spans) - 1}\x00"
+        seg = re.sub(r"`([^`\n]+)`", _stash, seg)
+        seg = _md_table(seg)
+        seg = re.sub(r"\*\*(?=\S)(.+?)(?<=\S)\*\*", r"<b>\1</b>", seg)          # **bold**
+        seg = re.sub(r"(?<![\w*])__(?=\S)(.+?)(?<=\S)__(?![\w*])", r"<b>\1</b>", seg)  # __bold__
+        seg = re.sub(r"(?<![\w*])\*(?=\S)([^*\n]+?)(?<=\S)\*(?![\w*])", r"<i>\1</i>", seg)  # *italic*
+        seg = re.sub(r"(?<![\w_])_(?=\S)([^_\n]+?)(?<=\S)_(?![\w_])", r"<i>\1</i>", seg)    # _italic_
+        seg = re.sub(r"~~(?=\S)(.+?)(?<=\S)~~", r"<s>\1</s>", seg)              # ~~strike~~
         seg = re.sub(r"\[([^\]\n]+)\]\((https?://[^)\s]+)\)", r'<a href="\2">\1</a>', seg)
-        seg = re.sub(r"(?m)^#{1,6}\s+(.+)$", r"<b>\1</b>", seg)
+        seg = re.sub(r"(?m)^\s{0,3}#{1,6}\s+(.+?)\s*#*$", r"<b>\1</b>", seg)    # # heading
+        seg = re.sub(r"(?m)^(\s*)[-*+]\s+", r"\1• ", seg)                      # - bullet -> •
+        seg = re.sub(r"(?m)^\s*(-{3,}|\*{3,}|_{3,})\s*$", "──────────", seg)   # --- rule
+        seg = re.sub(r"(?m)^\s*&gt;\s?", "▎ ", seg)                            # > quote (already escaped)
+        seg = re.sub(r"\x00(\d+)\x00", lambda m: f"<code>{spans[int(m.group(1))]}</code>", seg)
         out.append(seg)
     return "".join(out)
 

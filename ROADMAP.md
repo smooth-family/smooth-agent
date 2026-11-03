@@ -99,7 +99,31 @@ messages on channels that can edit messages (Slack, Discord, Matrix).
 - `http_request` (secrets via `{{env:NAME}}`), email (IMAP search/read, SMTP send and reply),
   `git` and `github` without a terminal, read-only `sql_query`, `web_watch` (change-only alerts).
 
-Still to do: calendar (CalDAV / Google), Postgres/MySQL read-only, Notion / Google Drive helpers.
+## Stage 8 — Workflows  ✅ (v0.9.0)
+
+- Named, reusable **workflows**: a saved playbook of steps with `{{parameters}}` filled in at run
+  time. `workflow` tool (create / list / show / update / remove / run) and `smooth-agent workflow`.
+- Parameters are declared (name, description, optional default, required); every `{{placeholder}}`
+  in the steps must be declared, and a run checks required values before an agent is started.
+- Run one on demand (through the job queue when the daemon is up, inline from the CLI otherwise) or
+  on a schedule — a `cronjob` / `cron add` can target a workflow by name (`--workflow`).
+- Stored in the one SQLite database; runs are counted and results delivered like any scheduled run.
+
+## Stage 8.2 — More connectors  ✅ (v0.10.0)
+
+- `calendar` (Google Calendar / CalDAV): agenda, search, create.
+- `notion` (search, read page, query database, append) and `gdrive` (list / search / read as text).
+- `sql_query` extended to read-only Postgres and MySQL via `[sql.<name>]` connections (pure-Python
+  `pg8000` / `pymysql`, `postgres` / `mysql` extras).
+- Telegram replies render Markdown tables, bullets, italics, strike and quotes tidily.
+
+## Stage 8.3 — More skills  ✅ (v0.10.0)
+
+- Playbooks that combine the new tools: `daily-briefing`, `inbox-triage`, `calendar-assistant`,
+  `meeting-notes` (productivity) and `airdrop-tracker` (blockchain — the owner's own wallets, with
+  change alerts and claim-page safety checks).
+
+Next in Stage 8 (planned): desktop control / voice conversations / multi-tenant.
 
 ## Later
 

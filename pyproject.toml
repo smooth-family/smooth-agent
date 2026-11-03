@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "smooth-agent"
-version = "0.8.0"
+version = "0.10.0"
 description = "Self-hostable, multi-router AI agent with tools, skills and sub-agents."
 requires-python = ">=3.9"
 license = { text = "MIT" }
@@ -19,6 +19,9 @@ dependencies = [
 
 [project.optional-dependencies]
 browser = ["playwright>=1.40"]
+# read-only Postgres / MySQL for sql_query — pure-Python drivers, no system libraries
+postgres = ["pg8000>=1.30"]
+mysql = ["pymysql>=1.1"]
 dev = ["playwright>=1.40"]
 
 [project.urls]

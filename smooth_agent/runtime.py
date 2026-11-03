@@ -89,6 +89,9 @@ def build_runtime(config_path: str | None = None, *, approver: Approver | None =
 
     from .connect import add_connect_tools
     add_connect_tools(reg, ws, cfg, http=st.http)  # http_request, github, git, sql_query, email (when [email] is set)
+    if st.http:
+        from .services import add_service_tools
+        add_service_tools(reg, cfg)  # calendar, notion, gdrive (each only when its config/token is present)
 
     from .media import MediaSettings, add_media_tools, describe
     ms = MediaSettings.from_config(cfg)
@@ -134,6 +137,9 @@ def build_runtime(config_path: str | None = None, *, approver: Approver | None =
         add_session_tools(reg, store, lambda: rt_ref["agent"].session_id if "agent" in rt_ref else sid)
         crons, jobs = Crons(store, st.timezone or None), Jobs(store)
         add_cron_tool(reg, crons, jobs, home, scripts_allowed=st.terminal)
+        from .workflows import Workflows, add_workflow_tool
+        add_workflow_tool(reg, Workflows(store),
+                          enqueue=lambda name, params: jobs.enqueue("workflow", {"name": name, "params": params}, priority=5))
         if st.http:
             from .watch import add_watch_tool
             add_watch_tool(reg, crons, jobs)

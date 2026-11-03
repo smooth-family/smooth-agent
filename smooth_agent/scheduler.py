@@ -40,12 +40,13 @@ class Crons:
         self.tz = tz
 
     def create(self, name: str, schedule: str, prompt: str, *, repeat: int = 0, deliver: str = "",
-               skills: list[str] | None = None, model: str = "", script: str = "", watch: dict | None = None) -> dict:
+               skills: list[str] | None = None, model: str = "", script: str = "", watch: dict | None = None,
+               workflow: str = "") -> dict:
         name = str(name or "").strip()
         if not NAME_OK.match(name):
             raise ToolError("name: letters, digits, '.', '_' or '-' (max 64), starting with a letter or digit")
-        if not str(prompt or "").strip() and not str(script or "").strip() and not watch:
-            raise ToolError("give a prompt (what the agent should do) and/or a script (a command to run)")
+        if not str(prompt or "").strip() and not str(script or "").strip() and not watch and not str(workflow or "").strip():
+            raise ToolError("give a prompt (what the agent should do), a script (a command to run), or a workflow name")
         try:
             sched = parse(schedule)
         except ScheduleError as e:
@@ -58,10 +59,10 @@ class Crons:
         if sched.kind == "once":
             repeat = 1
         with self.s.tx() as c:
-            c.execute("INSERT INTO crons (name, schedule, prompt, enabled, repeat, runs, deliver, skills, model, next_run, created, script, watch) "
-                      "VALUES (?,?,?,1,?,0,?,?,?,?,?,?,?)", (name, schedule, prompt or "", int(repeat or 0), deliver or "",
-                                                             json.dumps(skills or []), model or "", nxt, time.time(), script or "",
-                                                             json.dumps(watch) if watch else ""))
+            c.execute("INSERT INTO crons (name, schedule, prompt, enabled, repeat, runs, deliver, skills, model, next_run, created, script, watch, workflow) "
+                      "VALUES (?,?,?,1,?,0,?,?,?,?,?,?,?,?)", (name, schedule, prompt or "", int(repeat or 0), deliver or "",
+                                                               json.dumps(skills or []), model or "", nxt, time.time(), script or "",
+                                                               json.dumps(watch) if watch else "", workflow or ""))
         return self.get(name)
 
     def get(self, name: str) -> dict:
@@ -83,7 +84,7 @@ class Crons:
                 raise ToolError(str(e)) from None
             sets += ["schedule=?", "next_run=?"]
             args += [fields["schedule"], next_run(fields["schedule"], time.time(), self.tz)]
-        for k in ("prompt", "deliver", "model", "script"):
+        for k in ("prompt", "deliver", "model", "script", "workflow"):
             if fields.get(k) is not None:
                 sets.append(f"{k}=?")
                 args.append(str(fields[k]))
@@ -210,6 +211,8 @@ class Scheduler:
         job = self.jobs.claim(self.worker)
         if not job:
             return False
+        if job["kind"] == "workflow":
+            return self._run_workflow_job(job)
         name = job["payload"].get("name", "")
         try:
             cr = self.crons.get(name)
@@ -217,6 +220,14 @@ class Scheduler:
             self.jobs.finish(job["id"], "cron job was removed")
             return True
         prompt = cr["prompt"]
+        if cr.get("workflow"):  # a scheduled workflow: render it, append the cron's own prompt as extra context
+            from .workflows import Workflows
+            try:
+                rendered = Workflows(self.store).render(cr["workflow"])
+            except ToolError as e:
+                self.jobs.finish(job["id"], f"workflow error: {e}")
+                return True
+            prompt = f"{rendered}\n\n{prompt}" if prompt.strip() else rendered
         skills = json.loads(cr.get("skills") or "[]")
         if skills:
             prompt = f"Before you start, load and follow these skills with skill_view: {', '.join(skills)}.\n\n{prompt}"
@@ -266,6 +277,50 @@ class Scheduler:
                     d(cr, result, ok)
                 except Exception as e:
                     self.log(f"cron {name}: delivery failed: {e}")
+        return True
+
+    def _run_workflow_job(self, job: dict) -> bool:
+        """A one-off workflow run queued by the `workflow` tool or `smooth-agent workflow run`."""
+        from .workflows import Workflows
+        wfs = Workflows(self.store)
+        name = job["payload"].get("name", "")
+        params = job["payload"].get("params") or {}
+        try:
+            prompt = wfs.render(name, params)
+        except ToolError as e:  # removed, or missing/bad parameters: no point retrying
+            self.jobs.finish(job["id"], f"workflow error: {e}")
+            self.log(f"workflow {name}: {e}")
+            return True
+        model = ""
+        try:
+            model = wfs.get(name)["model"]
+        except ToolError:
+            pass
+        # a cron-shaped row so the output/delivery pipeline below is identical to a scheduled run
+        cr = {"name": f"workflow-{name}", "prompt": prompt, "deliver": job["payload"].get("deliver", ""),
+              "model": model, "skills": "[]", "script": "", "watch": "", "workflow": name}
+        self.log(f"workflow {name}: running (job {job['id']}, attempt {job['attempts']})")
+        try:
+            result = self.run_fn(prompt, cr)
+            ok = True
+            wfs.mark_run(name)
+        except Exception as e:
+            result = f"{type(e).__name__}: {e}"
+            ok = False
+            state = self.jobs.fail(job, result + "\n" + traceback.format_exc()[-2000:])
+            self.log(f"workflow {name}: failed ({state}): {result[:200]}")
+        if ok:
+            self.jobs.finish(job["id"], result)
+            self.log(f"workflow {name}: done")
+        out = self.home / "cron-output" / cr["name"]
+        out.mkdir(parents=True, exist_ok=True)
+        (out / time.strftime("%Y%m%d-%H%M%S.md")).write_text(result, encoding="utf-8")
+        if (ok and result.strip() != SILENT) or (not ok and job["attempts"] >= job["max_attempts"]):
+            for d in self.deliver:
+                try:
+                    d(cr, result, ok)
+                except Exception as e:
+                    self.log(f"workflow {name}: delivery failed: {e}")
         return True
 
     def loop(self, *, interval: float = 15.0, once: bool = False) -> None:
@@ -349,6 +404,7 @@ def add_cron_tool(reg: Registry, crons: Crons, jobs: Jobs, home: Path, *, script
             "repeat": {"type": "integer", "minimum": 0}, "deliver": {"type": "string"},
             "skills": {"type": "array", "items": {"type": "string"}}, "model": {"type": "string"},
             "script": {"type": "string", "description": "shell command for a watcher-style job (needs terminal enabled and the owner's OK)"},
+            "workflow": {"type": "string", "description": "name of a saved workflow to run on this schedule (instead of or before the prompt)"},
         }, "required": ["action"]},
     )
     def _cron(args: dict[str, Any]) -> str:
@@ -360,7 +416,8 @@ def add_cron_tool(reg: Registry, crons: Crons, jobs: Jobs, home: Path, *, script
             if not rows:
                 return "(no cron jobs)"
             return "\n".join(f"{r['name']}\t{'on' if r['enabled'] else 'off'}\t{r['schedule']}\tnext {fmt_time(r['next_run'], crons.tz)}\t"
-                             f"runs {r['runs']}{'/' + str(r['repeat']) if r['repeat'] else ''}\t{r['prompt'][:60]}" for r in rows) + daemon
+                             f"runs {r['runs']}{'/' + str(r['repeat']) if r['repeat'] else ''}\t"
+                             f"{r['prompt'][:60] or ('→ ' + r['workflow'] if r.get('workflow') else '')}" for r in rows) + daemon
         if args.get("script") and action in ("create", "update"):
             if not scripts_allowed:
                 raise ToolError("scheduled scripts need [tools] terminal = true")
@@ -369,12 +426,12 @@ def add_cron_tool(reg: Registry, crons: Crons, jobs: Jobs, home: Path, *, script
         if action == "create":
             r = crons.create(name, args.get("schedule") or "", args.get("prompt") or "", repeat=int(args.get("repeat") or 0),
                              deliver=args.get("deliver") or "", skills=args.get("skills"), model=args.get("model") or "",
-                             script=args.get("script") or "")
+                             script=args.get("script") or "", workflow=args.get("workflow") or "")
             return f"created '{r['name']}' ({parse(r['schedule']).describe()}); next run {fmt_time(r['next_run'], crons.tz)}" + daemon
         if action == "update":
             r = crons.update(name, schedule=args.get("schedule"), prompt=args.get("prompt"), repeat=args.get("repeat"),
                              deliver=args.get("deliver"), skills=args.get("skills"), model=args.get("model"),
-                             script=args.get("script"))
+                             script=args.get("script"), workflow=args.get("workflow"))
             return f"updated '{name}'; next run {fmt_time(r['next_run'], crons.tz)}"
         if action in ("pause", "resume"):
             r = crons.update(name, enabled=action == "resume")

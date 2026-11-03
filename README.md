@@ -112,6 +112,9 @@ Everything lives in `~/.smooth-agent/` (override with `SMOOTH_AGENT_HOME`):
 - **Works while you sleep.** Scheduled jobs (`daily 07:00`, `every 2h`, cron)
   that survive restarts and retry, deliver their result to your chat, plus cheap
   script watchers that only wake the model when something changed.
+- **Reusable workflows.** Save a multi-step task once as a named playbook with
+  `{{parameters}}`, then run it by name or on a schedule — "research", "weekly
+  report", "triage my inbox" — without rewriting the instructions each time.
 - **~200 skills.** Tested playbooks for coding agents, GitHub, documents, media,
   research, finance, productivity, smart home and more. The agent reads a skill
   when a task matches it, and writes or improves its own skills as it learns
@@ -215,8 +218,11 @@ Built-in tools, no extra packages, nothing to install:
 | `email_search` · `email_read` · `email_send` | your mailbox over IMAP + SMTP: find, read (attachments saved to the workspace), send and reply in the thread | sending |
 | `git` | status, log, diff, show, branches — and add, commit, pull, push, checkout, clone | anything that changes a repo |
 | `github` | repo info, issues, PRs (with diff), search, notifications; open issues and PRs, comment, close | anything written on GitHub |
-| `sql_query` | read-only SQLite (app data, exports) | — |
+| `sql_query` | read-only SQLite, Postgres or MySQL (SELECT / WITH / SHOW only) | — |
 | `web_watch` | check a page or JSON API every N minutes and tell you **only when it changes** (no model call meanwhile) | — |
+| `calendar` | Google Calendar or CalDAV: agenda, search, create an event | creating an event |
+| `notion` | search, read a page / database, append a paragraph | appending |
+| `gdrive` | list / search Google Drive and read a file as text (Docs / Sheets / Slides exported) | — |
 
 Secrets stay out of the model: write `{{env:NOTION_TOKEN}}` in a request and the
 value is filled in at the last moment; the email password and `GITHUB_TOKEN` come
@@ -284,6 +290,12 @@ smooth-agent sessions list | show <id> | search <words>
 smooth-agent cron add morning "daily 07:00" "Summarise the top tech news for me" --deliver telegram
 smooth-agent cron add hn "*/15 * * * *" --script "python3 watch_rss.py --name hn --url https://news.ycombinator.com/rss"
 smooth-agent cron list | run <name> | pause <name> | remove <name>
+
+# Reusable workflows: save a parameterised playbook, then run it by name or on a schedule
+smooth-agent workflow add research "Research {{topic}} and summarise in {{lang}}." --param topic --param lang=English
+smooth-agent workflow run research topic="solar storage" lang=Indonesian
+smooth-agent cron add daily-research "daily 08:00" "" --workflow research --deliver telegram
+smooth-agent workflow list | show <name> | remove <name>
 ```
 
 ## Tools
@@ -302,6 +314,7 @@ smooth-agent cron list | run <name> | pause <name> | remove <name>
 | `memory` | long-term memory: add / replace / remove / search / pin | on |
 | `session_search` | search past conversations | on |
 | `cronjob` | schedule agent runs and script watchers | on (scripts need `terminal`) |
+| `workflow` | save, run and schedule reusable parameterised playbooks | on |
 | `clarify` | ask you a question with choices | on |
 | `send_message` | message you on a chat channel | when a channel runs |
 | `vision_analyze` | understand images (URL, file, screenshot) | on |
