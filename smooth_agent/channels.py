@@ -66,6 +66,92 @@ def _post_json(url: str, payload: dict, *, headers: dict[str, str] | None = None
         return status, {"raw": body.decode("utf-8", "replace")}
 
 
+class _NoAuthAcrossHosts(urllib.request.HTTPRedirectHandler):
+    """Follow redirects, but never carry the bot token to a different host (a file URL that redirects to a CDN)."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        new = super().redirect_request(req, fp, code, msg, headers, newurl)
+        if new is not None and urllib.parse.urlparse(newurl).hostname != urllib.parse.urlparse(req.full_url).hostname:
+            for k in [k for k in new.headers if k.lower() == "authorization"]:
+                del new.headers[k]
+        return new
+
+
+_opener = urllib.request.build_opener(_NoAuthAcrossHosts)
+MAX_FILE = 50 * 1024 * 1024  # what any channel downloads for the agent (inbox) by default
+
+
+def fetch_to(url: str, dest: Path, *, headers: dict[str, str] | None = None, max_bytes: int = MAX_FILE,
+             timeout: float = 120.0) -> Path:
+    """Stream a URL into dest with a size cap; refuses an HTML page (a login redirect instead of the file)."""
+    if not url.lower().startswith(("https://", "http://")):
+        raise RuntimeError(f"not a web URL: {url[:60]}")
+    req = urllib.request.Request(url, headers=headers or {})
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        with _opener.open(req, timeout=timeout) as r:  # noqa: S310 (file URLs handed to us by the chat platform)
+            if "text/html" in (r.headers.get("content-type") or "").lower():
+                raise RuntimeError("the server answered with a web page instead of the file (missing permission/scope?)")
+            size = int(r.headers.get("content-length") or 0)
+            if size > max_bytes:
+                raise RuntimeError(f"file is {size / 1e6:.0f} MB; the limit is {max_bytes / 1e6:.0f} MB")
+            got = 0
+            with open(dest, "wb") as fh:
+                while True:
+                    block = r.read(1 << 16)
+                    if not block:
+                        break
+                    got += len(block)
+                    if got > max_bytes:
+                        raise RuntimeError(f"file is over the {max_bytes / 1e6:.0f} MB limit")
+                    fh.write(block)
+    except urllib.error.HTTPError as e:
+        dest.unlink(missing_ok=True)
+        raise RuntimeError(f"download failed: HTTP {e.code}") from None
+    except Exception:
+        dest.unlink(missing_ok=True)
+        raise
+    return dest
+
+
+def multipart(fields: dict[str, str], files: dict[str, tuple[str, str, bytes]]) -> tuple[bytes, str]:
+    """multipart/form-data body. files = {field: (filename, mime, bytes)}. Returns (body, content_type)."""
+    boundary = uuid.uuid4().hex
+    parts = [f'--{boundary}\r\nContent-Disposition: form-data; name="{k}"\r\n\r\n{v}\r\n'.encode()
+             for k, v in fields.items() if v not in (None, "")]
+    for k, (fname, mime, data) in files.items():
+        fname = safe_filename(fname).replace('"', "_")
+        parts.append(f'--{boundary}\r\nContent-Disposition: form-data; name="{k}"; filename="{fname}"\r\n'
+                     f"Content-Type: {mime}\r\n\r\n".encode() + data + b"\r\n")
+    return b"".join(parts) + f"--{boundary}--\r\n".encode(), f"multipart/form-data; boundary={boundary}"
+
+
+def file_kind(path: Path) -> tuple[str, str]:
+    """(kind, mime) for sending: image / voice / audio / video / document."""
+    import mimetypes
+    ext = path.suffix.lower()
+    mime = mimetypes.guess_type(path.name)[0] or "application/octet-stream"
+    if ext in (".jpg", ".jpeg", ".png", ".webp", ".gif"):
+        return "image", mime
+    if ext in (".ogg", ".oga", ".opus"):
+        return "voice", "audio/ogg"
+    if ext in (".mp3", ".m4a", ".aac", ".flac", ".wav"):
+        return "audio", mime
+    if ext in (".mp4", ".mov", ".webm"):
+        return "video", mime
+    return "document", mime
+
+
+def _ext_for(mime: str) -> str:
+    """A file extension for a MIME type ('audio/ogg; codecs=opus' -> '.ogg')."""
+    import mimetypes
+    base = mime.split(";", 1)[0].strip().lower()
+    known = {"audio/ogg": ".ogg", "audio/opus": ".ogg", "image/jpeg": ".jpg", "audio/mpeg": ".mp3", "audio/mp4": ".m4a",
+             "video/mp4": ".mp4", "audio/aac": ".aac", "audio/amr": ".amr", "image/webp": ".webp", "text/plain": ".txt",
+             "audio/webm": ".webm", "video/webm": ".webm"}
+    return known.get(base) or (mimetypes.guess_extension(base) or "" if base else "")
+
+
 def chunk(text: str, limit: int = MAX_LEN) -> list[str]:
     """Split a long reply on line boundaries so each piece fits one message."""
     text = text or "(no answer)"
@@ -306,21 +392,14 @@ class TelegramChannel(Channel):
 
     def _upload(self, method: str, field: str, path: Path, mime: str, fields: dict[str, str]) -> None:
         """Multipart upload of one file to a Bot API method (sendVoice, sendPhoto, sendDocument, …)."""
-        import uuid as _uuid
         size = path.stat().st_size
         if size > self.MAX_UPLOAD:
             raise RuntimeError(f"{path.name} is {size / 1e6:.0f} MB; Telegram bots can send files up to 50 MB")
-        boundary = _uuid.uuid4().hex
-        body = b"".join(f'--{boundary}\r\nContent-Disposition: form-data; name="{k}"\r\n\r\n{v}\r\n'.encode()
-                        for k, v in fields.items() if v)
-        name = safe_filename(path.name).replace('"', "_")
-        body += (f'--{boundary}\r\nContent-Disposition: form-data; name="{field}"; filename="{name}"\r\n'
-                 f"Content-Type: {mime}\r\n\r\n").encode() + path.read_bytes() + f"\r\n--{boundary}--\r\n".encode()
+        body, ctype = multipart(fields, {field: (path.name, mime, path.read_bytes())})
         url = f"{TELEGRAM_API}/bot{self.token}/{method}"
         for attempt in range(3):
             try:
-                _status, raw = _http("POST", url, headers={"content-type": f"multipart/form-data; boundary={boundary}"},
-                                     data=body, timeout=300)
+                _status, raw = _http("POST", url, headers={"content-type": ctype}, data=body, timeout=300)
                 data = json.loads(raw or b"{}")
                 if not data.get("ok"):
                     raise RuntimeError(f"telegram {method}: {data.get('description') or data}")
@@ -399,9 +478,9 @@ class TelegramChannel(Channel):
         if "callback_query" in upd:
             cq = upd["callback_query"]
             self._api("answerCallbackQuery", {"callback_query_id": cq.get("id")}, timeout=10)
-            data = str(cq.get("data") or "")
-            if self.hub and (data.startswith("a:") or data.startswith("d:")):
-                self.hub.resolve_approval(data[2:], data.startswith("a:"))
+            if self.hub:
+                self.hub.button(self, str(cq.get("data") or ""), user_id=str((cq.get("from") or {}).get("id") or ""),
+                                chat_id=str(((cq.get("message") or {}).get("chat") or {}).get("id") or ""))
             return
         msg = upd.get("message") or upd.get("edited_message")
         if not msg:
@@ -470,12 +549,18 @@ class WhatsAppChannel(Channel):
 
     kind = "whatsapp"
     webhook_path = "/webhook/whatsapp"
+    supports_buttons = True   # interactive reply buttons
+    supports_files = True
+    supports_voice = True
+    # Cloud API send limits per media type (bytes)
+    SEND_LIMITS = {"image": 5 << 20, "audio": 16 << 20, "voice": 16 << 20, "video": 16 << 20, "document": 100 << 20}
 
     def __init__(self, cfg: ChannelConfig, *, log: Callable[[str], None] = print):
         super().__init__(cfg, log=log)
         self.token = str(cfg.options.get("token") or "")
         self.phone_id = str(cfg.options.get("phone_id") or "")
         self.verify_token = str(cfg.options.get("verify_token") or "")
+        self.app_secret = str(cfg.options.get("app_secret") or "")  # optional: verify X-Hub-Signature-256
 
     def start(self, hub: "ChannelHub") -> None:
         super().start(hub)
@@ -483,12 +568,85 @@ class WhatsAppChannel(Channel):
             raise RuntimeError("whatsapp: need token and phone_id in [channels.whatsapp]")
         self.log(f"whatsapp: webhook at {self.webhook_path}; owners: {', '.join(self.cfg.owners) or 'NONE'}")
 
+    def _auth(self) -> dict[str, str]:
+        return {"authorization": f"Bearer {self.token}"}
+
+    def _message(self, payload: dict) -> dict:
+        status, data = _post_json(f"{WHATSAPP_API}/{self.phone_id}/messages",
+                                  {"messaging_product": "whatsapp", **payload}, headers=self._auth())
+        if status >= 400:
+            raise RuntimeError(f"whatsapp: {((data.get('error') or {}).get('message')) or status}")
+        return data
+
     def send(self, chat_id: str, text: str, *, buttons: list[tuple[str, str]] | None = None) -> None:
-        url = f"{WHATSAPP_API}/{self.phone_id}/messages"
-        head = {"authorization": f"Bearer {self.token}"}
-        for part in chunk(text, 4000):
-            _post_json(url, {"messaging_product": "whatsapp", "to": chat_id, "type": "text",
-                             "text": {"body": part}}, headers=head)
+        parts = chunk(text, 4000)
+        if buttons:  # the last part carries the reply buttons (body ≤ 1024, ≤ 3 buttons, title ≤ 20)
+            parts, last = parts[:-1], parts[-1]
+            if len(last) > 1024:
+                parts.append(last)
+                last = "Allow it?"
+        for part in parts:
+            self._message({"to": chat_id, "type": "text", "text": {"body": part}})
+        if buttons:
+            self._message({"to": chat_id, "type": "interactive", "interactive": {
+                "type": "button", "body": {"text": last},
+                "action": {"buttons": [{"type": "reply", "reply": {"id": data[:256], "title": label[:20]}}
+                                       for label, data in buttons[:3]]}}})
+
+    def send_file(self, chat_id: str, path: Path, caption: str = "") -> str:
+        kind, mime = file_kind(path)
+        if kind == "image" and path.suffix.lower() not in (".jpg", ".jpeg", ".png"):
+            kind = "document"  # WhatsApp images are JPEG/PNG only
+        if kind == "video" and path.suffix.lower() != ".mp4":
+            kind = "document"
+        size = path.stat().st_size
+        if size > self.SEND_LIMITS[kind] and kind != "document":
+            kind = "document"
+        if size > self.SEND_LIMITS["document"]:
+            raise RuntimeError(f"{path.name} is {size / 1e6:.0f} MB; WhatsApp allows up to 100 MB")
+        body, ctype = multipart({"messaging_product": "whatsapp", "type": mime},
+                                {"file": (path.name, mime, path.read_bytes())})
+        status, raw = _http("POST", f"{WHATSAPP_API}/{self.phone_id}/media",
+                            headers={**self._auth(), "content-type": ctype}, data=body, timeout=300)
+        try:
+            media_id = json.loads(raw or b"{}").get("id")
+        except ValueError:
+            media_id = None
+        if status >= 400 or not media_id:
+            raise RuntimeError(f"whatsapp media upload failed (HTTP {status})")
+        wtype = "audio" if kind == "voice" else kind
+        media: dict[str, Any] = {"id": media_id}
+        if caption and wtype in ("image", "video", "document"):
+            media["caption"] = caption[:1024]
+        if wtype == "document":
+            media["filename"] = safe_filename(path.name)
+        self._message({"to": chat_id, "type": wtype, wtype: media})
+        if caption and wtype == "audio":
+            self.send(chat_id, caption)
+        return {"image": "photo", "voice": "voice note"}.get(kind, kind)
+
+    def send_voice(self, chat_id: str, ogg: Path, caption: str = "") -> None:
+        self.send_file(chat_id, ogg, caption)
+
+    def download(self, att: dict, dest_dir: Path) -> Path:
+        status, raw = _http("GET", f"{WHATSAPP_API}/{urllib.parse.quote(str(att['file_id']), safe='')}",
+                            headers=self._auth(), timeout=30)
+        try:
+            info = json.loads(raw or b"{}")
+        except ValueError:
+            info = {}
+        if status >= 400 or not info.get("url"):
+            raise RuntimeError(f"whatsapp: media lookup failed (HTTP {status})")
+        ext = _ext_for(info.get("mime_type") or att.get("mime") or "")
+        name = att.get("name") or f"{att.get('kind', 'file')}-{att['file_id']}{ext}"
+        return fetch_to(info["url"], unique_path(dest_dir, safe_filename(name)), headers=self._auth())
+
+    def verify(self, headers: dict[str, str], body: bytes) -> bool:
+        if not self.app_secret:
+            return True  # not configured: Meta's verify token + owner ids still gate the agent
+        sig = header(headers, "x-hub-signature-256")
+        want = "sha256=" + hmac.new(self.app_secret.encode(), body, hashlib.sha256).hexdigest()
+        return bool(sig) and hmac.compare_digest(want, sig)
 
     def handle_webhook(self, method: str, path: str, headers: dict[str, str], body: bytes) -> tuple[int, bytes]:
         if method == "GET":
@@ -496,6 +654,8 @@ class WhatsAppChannel(Channel):
             if q.get("hub.verify_token", [""])[0] == self.verify_token and self.verify_token:
                 return 200, q.get("hub.challenge", [""])[0].encode()
             return 403, b"forbidden"
+        if not self.verify(headers, body):
+            return 401, b"bad signature"
         try:
             data = json.loads(body or b"{}")
         except ValueError:
@@ -503,13 +663,37 @@ class WhatsAppChannel(Channel):
         for entry in data.get("entry", []):
             for ch in entry.get("changes", []):
                 for m in (ch.get("value") or {}).get("messages", []) or []:
-                    if m.get("type") != "text":
-                        continue
-                    inbound = Inbound(channel=self.name, chat_id=str(m.get("from")), user_id=str(m.get("from")),
-                                      text=(m.get("text") or {}).get("body", ""), raw=m)
-                    if self.hub:
-                        self.hub.dispatch(self, inbound)
+                    self._on_message(m)
         return 200, b"ok"
+
+    def _on_message(self, m: dict) -> None:
+        sender = str(m.get("from") or "")
+        mtype = m.get("type")
+        if mtype == "interactive":  # a tapped reply button
+            reply = (m.get("interactive") or {}).get("button_reply") or {}
+            if self.hub and not self.hub.button(self, str(reply.get("id") or ""), user_id=sender, chat_id=sender):
+                self.hub.dispatch(self, Inbound(channel=self.name, chat_id=sender, user_id=sender,
+                                                text=str(reply.get("title") or ""), raw=m))
+            return
+        text, atts = "", []
+        if mtype == "text":
+            text = (m.get("text") or {}).get("body", "")
+        elif mtype in ("image", "document", "audio", "video", "sticker"):
+            media = m.get(mtype) or {}
+            text = media.get("caption", "")
+            kind = {"image": "photo", "sticker": "photo"}.get(mtype, mtype)
+            if mtype == "audio" and media.get("voice"):
+                kind = "voice"
+            atts.append({"kind": kind, "file_id": media.get("id"), "name": media.get("filename") or "",
+                         "mime": media.get("mime_type", ""), "size": 0})
+        elif mtype == "location":
+            loc = m.get("location") or {}
+            text = f"[location] {loc.get('name') or ''} {loc.get('latitude')},{loc.get('longitude')} {loc.get('address') or ''}".strip()
+        else:
+            return
+        if self.hub:
+            self.hub.dispatch(self, Inbound(channel=self.name, chat_id=sender, user_id=sender, text=text, raw=m,
+                                            attachments=atts))
 
 
 # ---------------------------------------------------------------- WeChat Work (notify)
@@ -550,6 +734,9 @@ class SlackChannel(Channel):
     kind = "slack"
     webhook_path = "/webhook/slack"
     MAX_SKEW = 300  # seconds; Slack's replay-protection window
+    supports_buttons = True  # Block Kit buttons; set the app's Interactivity Request URL to the same webhook
+    supports_files = True
+    supports_voice = True
 
     def __init__(self, cfg: ChannelConfig, *, log: Callable[[str], None] = print):
         super().__init__(cfg, log=log)
@@ -562,10 +749,73 @@ class SlackChannel(Channel):
             raise RuntimeError("slack: need token (bot token) and signing_secret in [channels.slack]")
         self.log(f"slack: webhook at {self.webhook_path}; owners: {', '.join(self.cfg.owners) or 'NONE'}")
 
+    def _api(self, method: str, payload: dict) -> dict:
+        _s, data = _post_json(f"{SLACK_API}/{method}", payload, headers={"authorization": f"Bearer {self.token}"})
+        if not data.get("ok"):
+            raise RuntimeError(f"slack {method}: {data.get('error') or data}")
+        return data
+
     def send(self, chat_id: str, text: str, *, buttons: list[tuple[str, str]] | None = None) -> None:
-        head = {"authorization": f"Bearer {self.token}"}
-        for part in chunk(text):
-            _post_json(f"{SLACK_API}/chat.postMessage", {"channel": chat_id, "text": part}, headers=head)
+        parts = chunk(text)
+        for i, part in enumerate(parts):
+            payload: dict[str, Any] = {"channel": chat_id, "text": part}
+            if buttons and i == len(parts) - 1:
+                payload["blocks"] = [
+                    {"type": "section", "text": {"type": "mrkdwn", "text": part[:2900]}},
+                    {"type": "actions", "elements": [
+                        {"type": "button", "text": {"type": "plain_text", "text": label[:75]}, "value": data[:2000],
+                         "action_id": f"smooth_{n}", **({"style": "primary"} if data.startswith("a:") else
+                                                       {"style": "danger"} if data.startswith("d:") else {})}
+                        for n, (label, data) in enumerate(buttons[:5])]}]
+            self._api("chat.postMessage", payload)
+
+    def send_file(self, chat_id: str, path: Path, caption: str = "") -> str:
+        size = path.stat().st_size
+        if size > 1 << 30:
+            raise RuntimeError(f"{path.name} is too big for Slack (1 GB max)")
+        # files.upload is retired: get an upload URL, send the bytes, then complete into the channel
+        q = urllib.parse.urlencode({"filename": safe_filename(path.name), "length": str(size)}).encode()
+        _s, raw = _http("POST", f"{SLACK_API}/files.getUploadURLExternal", data=q,
+                        headers={"authorization": f"Bearer {self.token}", "content-type": "application/x-www-form-urlencoded"})
+        try:
+            up = json.loads(raw or b"{}")
+        except ValueError:
+            up = {}
+        if not up.get("ok"):
+            raise RuntimeError(f"slack files.getUploadURLExternal: {up.get('error') or 'failed'} (scope files:write?)")
+        status, _r = _http("POST", up["upload_url"], data=path.read_bytes(),
+                           headers={"content-type": "application/octet-stream"}, timeout=300)
+        if status >= 400:
+            raise RuntimeError(f"slack upload failed (HTTP {status})")
+        self._api("files.completeUploadExternal", {"files": [{"id": up["file_id"], "title": path.name}],
+                                                   "channel_id": chat_id, **({"initial_comment": caption} if caption else {})})
+        kind, _mime = file_kind(path)
+        return {"image": "image", "voice": "audio file"}.get(kind, kind if kind != "document" else "file")
+
+    def send_voice(self, chat_id: str, ogg: Path, caption: str = "") -> None:
+        self.send_file(chat_id, ogg, caption)
+
+    def download(self, att: dict, dest_dir: Path) -> Path:
+        url = att.get("url") or ""
+        if not url:
+            raise RuntimeError("slack: the file has no download URL (external or deleted file)")
+        return fetch_to(url, unique_path(dest_dir, safe_filename(att.get("name") or att["file_id"])),
+                        headers={"authorization": f"Bearer {self.token}"})
+
+    @staticmethod
+    def attachments(ev: dict) -> list[dict]:
+        out = []
+        for f in ev.get("files") or []:
+            mime = str(f.get("mimetype") or "")
+            sub = str(f.get("subtype") or "")
+            kind = ("voice" if sub == "slack_audio" else "video" if sub == "slack_video" else
+                    "photo" if mime.startswith("image/") else "audio" if mime.startswith("audio/") else
+                    "video" if mime.startswith("video/") else "document")
+            dur = (f.get("duration_ms") or 0) // 1000 or None
+            out.append({"kind": kind, "file_id": str(f.get("id") or ""), "name": f.get("name") or f.get("title") or "",
+                        "size": f.get("size", 0), "mime": mime, "duration": dur,
+                        "url": f.get("url_private_download") or f.get("url_private") or ""})
+        return out
 
     def verify(self, headers: dict[str, str], body: bytes, now: float | None = None) -> bool:
         ts = header(headers, "x-slack-request-timestamp")
@@ -586,6 +836,8 @@ class SlackChannel(Channel):
             return 405, b"method not allowed"
         if not self.verify(headers, body):
             return 401, b"bad signature"
+        if "application/x-www-form-urlencoded" in header(headers, "content-type"):
+            return self._interaction(body)  # a tapped button (Interactivity Request URL)
         try:
             data = json.loads(body or b"{}")
         except ValueError:
@@ -595,12 +847,35 @@ class SlackChannel(Channel):
         if header(headers, "x-slack-retry-num"):
             return 200, b"ok"  # Slack retries when we were slow; we already queued it
         ev = data.get("event") or {}
-        if ev.get("type") == "message" and not ev.get("bot_id") and not ev.get("subtype") and ev.get("text"):
-            inbound = Inbound(channel=self.name, chat_id=str(ev.get("channel")), user_id=str(ev.get("user") or ""),
-                              text=ev["text"], raw=ev)
-            if self.hub:
-                self.hub.dispatch(self, inbound)
+        sub = ev.get("subtype")
+        if ev.get("type") == "message" and not ev.get("bot_id") and sub in (None, "file_share"):
+            atts = self.attachments(ev)
+            if ev.get("text") or atts:
+                inbound = Inbound(channel=self.name, chat_id=str(ev.get("channel")), user_id=str(ev.get("user") or ""),
+                                  text=ev.get("text") or "", raw=ev, attachments=atts)
+                if self.hub:
+                    self.hub.dispatch(self, inbound)
         return 200, b"ok"
+
+    def _interaction(self, body: bytes) -> tuple[int, bytes]:
+        form = urllib.parse.parse_qs(body.decode("utf-8", "replace"))
+        try:
+            p = json.loads((form.get("payload") or ["{}"])[0])
+        except ValueError:
+            return 400, b"bad payload"
+        if p.get("type") != "block_actions" or not p.get("actions"):
+            return 200, b""
+        value = str(p["actions"][0].get("value") or "")
+        user = str((p.get("user") or {}).get("id") or "")
+        chat = str((p.get("channel") or {}).get("id") or "")
+        ok = bool(self.hub) and self.hub.button(self, value, user_id=user, chat_id=chat)
+        if ok and p.get("response_url"):  # replace the buttons with the decision so they cannot be tapped twice
+            verdict = "✅ Allowed" if value.startswith("a:") else "❌ Denied"
+            try:
+                _post_json(p["response_url"], {"replace_original": True, "text": verdict}, timeout=10)
+            except Exception as e:
+                self.log(f"slack: could not update the approval message: {e}")
+        return 200, b""
 
 
 # ---------------------------------------------------------------- Matrix
@@ -620,6 +895,7 @@ class MatrixChannel(Channel):
         self._since: str | None = None
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
+        self._reactions: dict[str, tuple[str, str]] = {}  # approval prompt event id -> (allow data, deny data)
 
     def _req(self, method: str, path: str, payload: dict | None = None, *, timeout: float = 60.0) -> dict:
         h = {"authorization": f"Bearer {self.token}", "content-type": "application/json"}
@@ -630,11 +906,93 @@ class MatrixChannel(Channel):
         except ValueError:
             return {}
 
+    supports_buttons = True  # approval = the bot's ✅ / ❌ reactions under the prompt (typed yes/no works too)
+    supports_files = True
+    supports_voice = True
+    YES_KEY, NO_KEY = "✅", "❌"
+
+    def _event(self, room_id: str, etype: str, content: dict) -> str:
+        room = urllib.parse.quote(room_id, safe="")
+        data = self._req("PUT", f"/rooms/{room}/send/{etype}/{uuid.uuid4().hex}", content)
+        if not data.get("event_id"):
+            raise RuntimeError(f"matrix: send failed: {data.get('error') or data.get('errcode') or data}")
+        return str(data["event_id"])
+
     def send(self, chat_id: str, text: str, *, buttons: list[tuple[str, str]] | None = None) -> None:
-        room = urllib.parse.quote(chat_id, safe="")
+        last = ""
         for part in chunk(text, 16000):
-            txn = uuid.uuid4().hex
-            self._req("PUT", f"/rooms/{room}/send/m.room.message/{txn}", {"msgtype": "m.text", "body": part})
+            last = self._event(chat_id, "m.room.message", {"msgtype": "m.text", "body": part})
+        if buttons and last:
+            yes = next((d for _l, d in buttons if d.startswith("a:")), "")
+            no = next((d for _l, d in buttons if d.startswith("d:")), "")
+            self._reactions[last] = (yes, no)
+            for key in (self.YES_KEY, self.NO_KEY):
+                self._event(chat_id, "m.reaction", {"m.relates_to": {"rel_type": "m.annotation", "event_id": last,
+                                                                     "key": key}})
+
+    def _media_url(self, mxc: str) -> list[str]:
+        if not mxc.startswith("mxc://"):
+            raise RuntimeError("matrix: not an mxc:// URL")
+        server, _, media = mxc[6:].partition("/")
+        s, m = urllib.parse.quote(server, safe=""), urllib.parse.quote(media, safe="")
+        # authenticated media (spec v1.11) first, the legacy endpoint for older homeservers
+        return [f"{self.homeserver}/_matrix/client/v1/media/download/{s}/{m}",
+                f"{self.homeserver}/_matrix/media/v3/download/{s}/{m}"]
+
+    def download(self, att: dict, dest_dir: Path) -> Path:
+        if att.get("encrypted"):
+            raise RuntimeError("the file is end-to-end encrypted; send it in an unencrypted room")
+        dest = unique_path(dest_dir, safe_filename(att.get("name") or "file"))
+        err: Exception | None = None
+        for url in self._media_url(str(att.get("file_id") or "")):
+            try:
+                return fetch_to(url, dest, headers={"authorization": f"Bearer {self.token}"})
+            except Exception as e:
+                err = e
+        raise RuntimeError(f"matrix download failed: {err}")
+
+    def send_file(self, chat_id: str, path: Path, caption: str = "") -> str:
+        kind, mime = file_kind(path)
+        size = path.stat().st_size
+        if size > MAX_FILE:
+            raise RuntimeError(f"{path.name} is {size / 1e6:.0f} MB; the limit is {MAX_FILE / 1e6:.0f} MB")
+        q = urllib.parse.urlencode({"filename": safe_filename(path.name)})
+        _s, raw = _http("POST", f"{self.homeserver}/_matrix/media/v3/upload?{q}", data=path.read_bytes(), timeout=300,
+                        headers={"authorization": f"Bearer {self.token}", "content-type": mime})
+        try:
+            uri = json.loads(raw or b"{}").get("content_uri")
+        except ValueError:
+            uri = None
+        if not uri:
+            raise RuntimeError("matrix: upload failed")
+        msgtype = {"image": "m.image", "voice": "m.audio", "audio": "m.audio", "video": "m.video"}.get(kind, "m.file")
+        content: dict[str, Any] = {"msgtype": msgtype, "body": caption or path.name, "filename": safe_filename(path.name),
+                                   "url": uri, "info": {"mimetype": mime, "size": size}}
+        if kind == "voice":
+            content["org.matrix.msc3245.voice"] = {}
+            content["org.matrix.msc1767.audio"] = {}
+        self._event(chat_id, "m.room.message", content)
+        return {"image": "image", "voice": "voice message"}.get(kind, kind if kind != "document" else "file")
+
+    def send_voice(self, chat_id: str, ogg: Path, caption: str = "") -> None:
+        self.send_file(chat_id, ogg, caption)
+
+    @staticmethod
+    def attachment(content: dict) -> dict | None:
+        """The file in an m.image / m.file / m.audio / m.video event, or None."""
+        mt = content.get("msgtype")
+        if mt not in ("m.image", "m.file", "m.audio", "m.video"):
+            return None
+        info = content.get("info") or {}
+        encrypted = "file" in content and "url" not in content
+        url = (content.get("file") or {}).get("url") if encrypted else content.get("url")
+        kind = {"m.image": "photo", "m.audio": "audio", "m.video": "video"}.get(mt, "document")
+        if mt == "m.audio" and ("org.matrix.msc3245.voice" in content or "org.matrix.msc2516.voice" in content):
+            kind = "voice"
+        name = content.get("filename") or content.get("body") or "file"
+        dur = (info.get("duration") or 0) // 1000 or None
+        return {"kind": kind, "file_id": str(url or ""), "name": name, "size": info.get("size", 0),
+                "mime": info.get("mimetype", ""), "duration": dur, "encrypted": encrypted}
 
     def start(self, hub: "ChannelHub") -> None:
         super().start(hub)
@@ -675,13 +1033,34 @@ class MatrixChannel(Channel):
         rooms = ((data.get("rooms") or {}).get("join") or {})
         for room_id, room in rooms.items():
             for ev in ((room.get("timeline") or {}).get("events") or []):
-                if ev.get("type") != "m.room.message" or ev.get("sender") == self.user_id:
+                if ev.get("sender") == self.user_id:
                     continue
                 content = ev.get("content") or {}
-                if content.get("msgtype") != "m.text" or not content.get("body"):
+                sender = str(ev.get("sender") or "")
+                if ev.get("type") == "m.reaction":  # ✅ / ❌ under an approval prompt
+                    rel = content.get("m.relates_to") or {}
+                    pair = self._reactions.get(str(rel.get("event_id") or ""))
+                    key = str(rel.get("key") or "")
+                    if pair and self.hub and key in (self.YES_KEY, self.NO_KEY):
+                        choice = pair[0] if key == self.YES_KEY else pair[1]
+                        self.hub.button(self, choice, user_id=sender, chat_id=room_id)
+                        if sender in self._owners:  # a stranger's reaction must not use up the prompt
+                            self._reactions.pop(str(rel.get("event_id")), None)
+                            while len(self._reactions) > 200:  # prompts nobody answered
+                                self._reactions.pop(next(iter(self._reactions)))
                     continue
-                inbound = Inbound(channel=self.name, chat_id=room_id, user_id=str(ev.get("sender") or ""),
-                                  text=content["body"], name=str(ev.get("sender") or ""), raw=ev)
+                if ev.get("type") != "m.room.message":
+                    continue
+                att = self.attachment(content)
+                if att:
+                    caption = content.get("body", "") if content.get("filename") and content.get("body") != content.get("filename") else ""
+                    inbound = Inbound(channel=self.name, chat_id=room_id, user_id=sender, text=caption, name=sender,
+                                      raw=ev, attachments=[att])
+                elif content.get("msgtype") in ("m.text", "m.notice") and content.get("body"):
+                    inbound = Inbound(channel=self.name, chat_id=room_id, user_id=sender, text=content["body"],
+                                      name=sender, raw=ev)
+                else:
+                    continue
                 if self.hub:
                     self.hub.dispatch(self, inbound)
         # auto-join rooms an owner invites the bot to
@@ -704,24 +1083,85 @@ class LineChannel(Channel):
     kind = "line"
     webhook_path = "/webhook/line"
     API = "https://api.line.me/v2/bot"
+    DATA_API = "https://api-data.line.me/v2/bot"
+    supports_buttons = True  # quick-reply postback buttons
 
     def __init__(self, cfg: ChannelConfig, *, log: Callable[[str], None] = print):
         super().__init__(cfg, log=log)
         self.token = str(cfg.options.get("token") or "")
         self.secret = str(cfg.options.get("secret") or "")
+        # LINE bots cannot upload files: images/audio go out as HTTPS links to this agent's webhook server.
+        # public_url = the https address that reaches the webhook port, e.g. "https://agent.example.com"
+        self.public_url = str(cfg.options.get("public_url") or "").rstrip("/")
+
+    @property
+    def supports_files(self) -> bool:  # type: ignore[override]
+        return bool(self.public_url)
+
+    @property
+    def supports_voice(self) -> bool:  # type: ignore[override]
+        return bool(self.public_url)
 
     def start(self, hub: "ChannelHub") -> None:
         super().start(hub)
         if not (self.token and self.secret):
             raise RuntimeError("line: need token (channel access token) and secret (channel secret) in [channels.line]")
-        self.log(f"line: webhook at {self.webhook_path}; owners: {', '.join(self.cfg.owners) or 'NONE'}")
+        if self.public_url and not self.public_url.startswith("https://"):
+            raise RuntimeError("line: public_url must start with https:// (LINE only fetches HTTPS links)")
+        self.log(f"line: webhook at {self.webhook_path}; owners: {', '.join(self.cfg.owners) or 'NONE'}"
+                 + ("" if self.public_url else "; sending files is off (set public_url)"))
+
+    def _push(self, chat_id: str, messages: list[dict]) -> None:
+        for i in range(0, len(messages), 5):  # up to 5 messages per push
+            status, data = _post_json(f"{self.API}/message/push", {"to": chat_id, "messages": messages[i:i + 5]},
+                                      headers={"authorization": f"Bearer {self.token}"})
+            if status >= 400:
+                raise RuntimeError(f"line push: {data.get('message') or status}")
 
     def send(self, chat_id: str, text: str, *, buttons: list[tuple[str, str]] | None = None) -> None:
-        parts = chunk(text, 4900)
-        head = {"authorization": f"Bearer {self.token}"}
-        for i in range(0, len(parts), 5):  # up to 5 messages per push
-            _post_json(f"{self.API}/message/push", {"to": chat_id, "messages": [
-                {"type": "text", "text": p} for p in parts[i:i + 5]]}, headers=head)
+        msgs: list[dict] = [{"type": "text", "text": p} for p in chunk(text, 4900)]
+        if buttons:
+            msgs[-1]["quickReply"] = {"items": [
+                {"type": "action", "action": {"type": "postback", "label": label[:20], "data": data[:300],
+                                              "displayText": label[:300]}} for label, data in buttons[:13]]}
+        self._push(chat_id, msgs)
+
+    def send_file(self, chat_id: str, path: Path, caption: str = "") -> str:
+        if not (self.public_url and self.hub):
+            raise RuntimeError("LINE bots cannot upload files; set public_url in [channels.line] to send links")
+        kind, _mime = file_kind(path)
+        ext = path.suffix.lower()
+        if kind == "image" and ext in (".jpg", ".jpeg", ".png") and path.stat().st_size <= 10 << 20:
+            url = self.public_url + self.hub.share_file(path)
+            msgs = [{"type": "image", "originalContentUrl": url, "previewImageUrl": url}]
+            how = "image"
+        elif kind in ("voice", "audio"):
+            from . import voice
+            m4a = path if ext == ".m4a" else voice.to_m4a(path, path.with_suffix(".line.m4a"))
+            secs = voice.duration(m4a) or 1.0
+            msgs = [{"type": "audio", "originalContentUrl": self.public_url + self.hub.share_file(m4a),
+                     "duration": int(secs * 1000)}]
+            how = "audio"
+        else:  # documents, video, big images: a download link (valid for an hour)
+            msgs = [{"type": "text", "text": f"📎 {path.name}\n{self.public_url + self.hub.share_file(path)}\n(link works for 1 hour)"}]
+            how = "download link"
+        if caption:
+            msgs.append({"type": "text", "text": caption[:4900]})
+        self._push(chat_id, msgs)
+        return how
+
+    def send_voice(self, chat_id: str, ogg: Path, caption: str = "") -> None:
+        self.send_file(chat_id, ogg, caption)
+
+    def download(self, att: dict, dest_dir: Path) -> Path:
+        name = att.get("name") or f"{att.get('kind', 'file')}-{att['file_id']}{att.get('ext', '')}"
+        dest = unique_path(dest_dir, safe_filename(name))
+        if att.get("url"):  # content the sender's app hosts elsewhere (contentProvider.type = external)
+            if not str(att["url"]).startswith("https://"):
+                raise RuntimeError("line: external content is not an https link")
+            return fetch_to(att["url"], dest)
+        return fetch_to(f"{self.DATA_API}/message/{urllib.parse.quote(str(att['file_id']), safe='')}/content", dest,
+                        headers={"authorization": f"Bearer {self.token}"})
 
     def verify(self, headers: dict[str, str], body: bytes) -> bool:
         sig = header(headers, "x-line-signature")
@@ -740,44 +1180,319 @@ class LineChannel(Channel):
         except ValueError:
             return 400, b"bad json"
         for ev in data.get("events", []):
-            msg = ev.get("message") or {}
-            if ev.get("type") != "message" or msg.get("type") != "text":
-                continue
             src = ev.get("source") or {}
             uid = str(src.get("userId") or "")
             chat = str(src.get("groupId") or src.get("roomId") or uid)
-            inbound = Inbound(channel=self.name, chat_id=chat, user_id=uid, text=msg.get("text", ""), raw=ev)
+            if ev.get("type") == "postback":  # a tapped quick-reply button
+                if self.hub:
+                    self.hub.button(self, str((ev.get("postback") or {}).get("data") or ""), user_id=uid, chat_id=chat)
+                continue
+            msg = ev.get("message") or {}
+            if ev.get("type") != "message":
+                continue
+            mtype = msg.get("type")
+            text, atts = "", []
+            if mtype == "text":
+                text = msg.get("text", "")
+            elif mtype in ("image", "video", "audio", "file"):
+                prov = msg.get("contentProvider") or {}
+                ext = {"image": ".jpg", "video": ".mp4", "audio": ".m4a"}.get(mtype, "")
+                atts.append({"kind": {"image": "photo", "file": "document"}.get(mtype, mtype),
+                             "file_id": str(msg.get("id") or ""), "name": msg.get("fileName") or "", "ext": ext,
+                             "size": msg.get("fileSize", 0), "duration": (msg.get("duration") or 0) // 1000 or None,
+                             "url": prov.get("originalContentUrl") if prov.get("type") == "external" else ""})
+            elif mtype == "location":
+                text = f"[location] {msg.get('title') or ''} {msg.get('latitude')},{msg.get('longitude')} {msg.get('address') or ''}".strip()
+            else:
+                continue
             if self.hub:
-                self.hub.dispatch(self, inbound)
+                self.hub.dispatch(self, Inbound(channel=self.name, chat_id=chat, user_id=uid, text=text, raw=ev,
+                                                attachments=atts))
         return 200, b"ok"
 
 
 # ---------------------------------------------------------------- Discord (delivery)
 
 class DiscordChannel(Channel):
-    """Discord channel webhook — outbound delivery (cron results, alerts,
-    send_message). Create one under Channel settings → Integrations → Webhooks
-    and set options.webhook_url (or webhook_url_env). Two-way chat through the
-    bot gateway is not wired yet."""
+    """Discord. Two modes:
+
+    * **bot** (token set): two-way chat over the Gateway websocket — DMs with the
+      bot, or @mentions in a server channel; approval buttons; files and voice
+      messages in, files out. Owners are Discord user ids. In the Developer
+      Portal turn on the MESSAGE CONTENT intent for server channels (DMs work
+      without it).
+    * **delivery** (only webhook_url set): posts to one channel webhook (cron
+      results, alerts, send_message), as before.
+    """
 
     kind = "discord"
+    API = "https://discord.com/api/v10"
+    # GUILD_MESSAGES | DIRECT_MESSAGES | MESSAGE_CONTENT; without the privileged content intent: DMs only
+    INTENTS, INTENTS_NO_CONTENT = (1 << 9) | (1 << 12) | (1 << 15), (1 << 9) | (1 << 12)
+    VOICE_FLAG = 1 << 13
+    UPLOAD_LIMIT = 10 * 1024 * 1024  # what a bot may attach without a boosted server
 
     def __init__(self, cfg: ChannelConfig, *, log: Callable[[str], None] = print):
         super().__init__(cfg, log=log)
         self.webhook_url = str(cfg.options.get("webhook_url") or "")
+        self.token = str(cfg.options.get("token") or "")
+        # in server channels answer only when mentioned (default) or every owner message ("all")
+        self.guild_mode = str(cfg.options.get("guild_mode") or "mention").lower()
+        self.bot_id = ""
+        self._intents = self.INTENTS
+        self._stop = threading.Event()
+        self._ws = None
+        self._seq: int | None = None
+        self._session = ""
+        self._resume_url = ""
+        self._dm: dict[str, str] = {}  # owner user id -> DM channel id
 
+    @property
+    def two_way(self) -> bool:
+        return bool(self.token)
+
+    supports_buttons = property(lambda self: self.two_way)  # type: ignore[assignment]
+    supports_files = property(lambda self: self.two_way)    # type: ignore[assignment]
+    supports_voice = property(lambda self: self.two_way)    # type: ignore[assignment]
+
+    # --- REST ---
+    def _rest(self, method: str, path: str, payload: dict | None = None, *, data: bytes | None = None,
+              ctype: str = "application/json", tries: int = 3) -> dict:
+        body = data if data is not None else (json.dumps(payload).encode() if payload is not None else None)
+        head = {"authorization": f"Bot {self.token}", "user-agent": "DiscordBot (https://github.com/smooth-family/smooth-agent, 1)"}
+        if body is not None:
+            head["content-type"] = ctype
+        for attempt in range(tries):
+            status, raw = _http(method, f"{self.API}{path}", headers=head, data=body, timeout=120)
+            try:
+                out = json.loads(raw or b"{}") if raw else {}
+            except ValueError:
+                out = {"raw": raw[:200].decode("utf-8", "replace")}
+            if status == 429 and attempt < tries - 1:  # rate limited: wait what Discord asks
+                time.sleep(min(float((out or {}).get("retry_after") or 1.0), 10.0))
+                continue
+            if status >= 400:
+                raise RuntimeError(f"discord {method} {path.split('?')[0]}: {(out or {}).get('message') or status}")
+            return out if isinstance(out, dict) else {"items": out}
+        return {}
+
+    # --- lifecycle ---
     def start(self, hub: "ChannelHub") -> None:
         super().start(hub)
+        if self.two_way:
+            me = self._rest("GET", "/users/@me")
+            self.bot_id = str(me.get("id") or "")
+            threading.Thread(target=self._gateway_loop, name="discord-gateway", daemon=True).start()
+            self.log(f"discord: bot {me.get('username', '?')} connecting to the gateway; owners: "
+                     f"{', '.join(self.cfg.owners) or 'NONE — set [channels.discord] owners'}")
+            return
         if not self.webhook_url:
-            raise RuntimeError("discord: set webhook_url (or webhook_url_env) in [channels.discord]")
+            raise RuntimeError("discord: set token (bot, two-way) or webhook_url (delivery only) in [channels.discord]")
         self.log("discord: delivery webhook ready")
 
-    def owner_chat(self) -> str | None:
-        return "webhook"
+    def stop(self) -> None:
+        self._stop.set()
+        if self._ws is not None:
+            self._ws.close()
 
+    def owner_chat(self) -> str | None:
+        if not self.two_way:
+            return "webhook"
+        owner = next(iter(self.cfg.owners), None)
+        if not owner:
+            return None
+        if owner not in self._dm:
+            self._dm[owner] = str(self._rest("POST", "/users/@me/channels", {"recipient_id": owner}).get("id") or "")
+        return self._dm[owner] or None
+
+    # --- output ---
     def send(self, chat_id: str, text: str, *, buttons: list[tuple[str, str]] | None = None) -> None:
-        for part in chunk(text, 1900):  # Discord caps a message at 2000 chars
-            _post_json(self.webhook_url, {"content": part, "allowed_mentions": {"parse": []}})
+        parts = chunk(text, 1900)  # Discord caps a message at 2000 chars
+        if not self.two_way:
+            for part in parts:
+                _post_json(self.webhook_url, {"content": part, "allowed_mentions": {"parse": []}})
+            return
+        for i, part in enumerate(parts):
+            msg: dict[str, Any] = {"content": part, "allowed_mentions": {"parse": []}}
+            if buttons and i == len(parts) - 1:
+                msg["components"] = [{"type": 1, "components": [
+                    {"type": 2, "label": label[:80], "custom_id": data[:100],
+                     "style": 3 if data.startswith("a:") else 4 if data.startswith("d:") else 2}
+                    for label, data in buttons[:5]]}]
+            self._rest("POST", f"/channels/{chat_id}/messages", msg)
+
+    def send_file(self, chat_id: str, path: Path, caption: str = "") -> str:
+        if not self.two_way:
+            raise RuntimeError("discord: sending files needs the bot token (two-way mode)")
+        size = path.stat().st_size
+        if size > self.UPLOAD_LIMIT:
+            raise RuntimeError(f"{path.name} is {size / 1e6:.0f} MB; Discord bots can attach up to 10 MB")
+        kind, mime = file_kind(path)
+        payload = {"content": caption[:1900], "allowed_mentions": {"parse": []},
+                   "attachments": [{"id": 0, "filename": safe_filename(path.name)}]}
+        body, ctype = multipart({"payload_json": json.dumps(payload)}, {"files[0]": (path.name, mime, path.read_bytes())})
+        self._rest("POST", f"/channels/{chat_id}/messages", data=body, ctype=ctype)
+        return {"image": "image", "voice": "audio file"}.get(kind, kind if kind != "document" else "file")
+
+    def send_voice(self, chat_id: str, ogg: Path, caption: str = "") -> None:
+        self.send_file(chat_id, ogg, caption)
+
+    def typing(self, chat_id: str) -> None:
+        if self.two_way:
+            try:
+                self._rest("POST", f"/channels/{chat_id}/typing", tries=1)
+            except Exception:
+                pass
+
+    def download(self, att: dict, dest_dir: Path) -> Path:
+        url = str(att.get("url") or "")
+        host = urllib.parse.urlparse(url).hostname or ""
+        if not (url.startswith("https://") and (host.endswith("discordapp.com") or host.endswith("discordapp.net")
+                                                or host.endswith("discord.com"))):
+            raise RuntimeError("discord: attachment is not on Discord's CDN")
+        # CDN links are signed; the bot token is never sent there
+        return fetch_to(url, unique_path(dest_dir, safe_filename(att.get("name") or "file")))
+
+    # --- gateway ---
+    def _gateway_loop(self) -> None:
+        from .wsclient import WebSocketClosed
+        backoff = 1.0
+        while not self._stop.is_set():
+            try:
+                self._run_gateway()
+                backoff = 1.0
+            except WebSocketClosed as e:
+                if e.code in (4004, 4010, 4011, 4012, 4013):  # bad token / shard / version / intents: retrying won't help
+                    self.log(f"discord: gateway refused the bot ({e}); two-way chat is off")
+                    return
+                if e.code == 4014 and self._intents == self.INTENTS:
+                    self.log("discord: MESSAGE CONTENT intent is not enabled for this bot — DMs only "
+                             "(turn it on in the Developer Portal → Bot to use server channels)")
+                    self._intents = self.INTENTS_NO_CONTENT
+                    self._session = ""
+                    continue
+                if e.code in (4007, 4009):  # bad seq / session timed out: identify fresh
+                    self._session = ""
+                if not self._stop.is_set():
+                    self.log(f"discord: gateway {e}; reconnecting")
+            except Exception as e:
+                if not self._stop.is_set():
+                    self.log(f"discord: gateway error: {e}; reconnecting")
+            finally:
+                if self._ws is not None:
+                    self._ws.close()
+                    self._ws = None
+            self._stop.wait(backoff)
+            backoff = min(backoff * 2, 60.0)
+
+    def _run_gateway(self) -> None:
+        import random
+        from .wsclient import WebSocket
+        base = self._resume_url if (self._session and self._resume_url) else \
+            str(self._rest("GET", "/gateway/bot").get("url") or "wss://gateway.discord.gg")
+        ws = self._ws = WebSocket.connect(base.rstrip("/") + "/?v=10&encoding=json")
+        hello = json.loads(ws.recv())
+        interval = float(((hello.get("d") or {}).get("heartbeat_interval") or 41250)) / 1000.0
+        acked = threading.Event()
+        acked.set()
+
+        def beat() -> None:
+            if self._stop.wait(interval * random.random()):
+                return
+            while not self._stop.is_set() and not ws.closed:
+                if not acked.is_set():  # no ack for the last beat: a zombie connection
+                    ws.close(4000)
+                    return
+                acked.clear()
+                try:
+                    ws.send_text(json.dumps({"op": 1, "d": self._seq}))
+                except Exception:
+                    return
+                if self._stop.wait(interval):
+                    return
+
+        threading.Thread(target=beat, name="discord-heartbeat", daemon=True).start()
+        if self._session:
+            ws.send_text(json.dumps({"op": 6, "d": {"token": self.token, "session_id": self._session, "seq": self._seq}}))
+        else:
+            ws.send_text(json.dumps({"op": 2, "d": {"token": self.token, "intents": self._intents,
+                                                    "properties": {"os": "linux", "browser": "smooth-agent",
+                                                                   "device": "smooth-agent"}}}))
+        while not self._stop.is_set():
+            msg = json.loads(ws.recv())
+            op = msg.get("op")
+            if msg.get("s") is not None:
+                self._seq = msg["s"]
+            if op == 11:
+                acked.set()
+            elif op == 1:
+                ws.send_text(json.dumps({"op": 1, "d": self._seq}))
+            elif op == 7:  # reconnect requested
+                return
+            elif op == 9:  # invalid session
+                if not msg.get("d"):
+                    self._session, self._seq = "", None
+                return
+            elif op == 0:
+                try:
+                    self._event(str(msg.get("t") or ""), msg.get("d") or {})
+                except Exception as e:
+                    self.log(f"discord: event error: {e}")
+
+    def _event(self, t: str, d: dict) -> None:
+        if t == "READY":
+            self._session = str(d.get("session_id") or "")
+            self._resume_url = str(d.get("resume_gateway_url") or "")
+            self.bot_id = str((d.get("user") or {}).get("id") or self.bot_id)
+            self.log("discord: gateway ready")
+        elif t == "MESSAGE_CREATE":
+            self._on_message(d)
+        elif t == "INTERACTION_CREATE" and d.get("type") == 3:  # a button
+            self._on_button(d)
+
+    def _on_message(self, d: dict) -> None:
+        author = d.get("author") or {}
+        if author.get("bot") or str(author.get("id")) == self.bot_id:
+            return
+        text = str(d.get("content") or "")
+        if d.get("guild_id"):
+            mentioned = any(str(m.get("id")) == self.bot_id for m in d.get("mentions") or [])
+            if self.guild_mode != "all" and not mentioned:
+                return
+            text = text.replace(f"<@{self.bot_id}>", "").replace(f"<@!{self.bot_id}>", "").strip()
+        voice = bool(int(d.get("flags") or 0) & self.VOICE_FLAG)
+        atts = []
+        for a in d.get("attachments") or []:
+            ctype = str(a.get("content_type") or "")
+            kind = ("voice" if voice else "photo" if ctype.startswith("image/") else "audio" if ctype.startswith("audio/")
+                    else "video" if ctype.startswith("video/") else "document")
+            atts.append({"kind": kind, "file_id": str(a.get("id") or ""), "name": a.get("filename") or "",
+                         "size": a.get("size", 0), "mime": ctype, "url": a.get("url") or "",
+                         "duration": round(a["duration_secs"]) if a.get("duration_secs") else None})
+        if (text or atts) and self.hub:
+            self.hub.dispatch(self, Inbound(channel=self.name, chat_id=str(d.get("channel_id")), text=text,
+                                            user_id=str(author.get("id") or ""), name=str(author.get("username") or ""),
+                                            raw=d, attachments=atts))
+
+    def _on_button(self, d: dict) -> None:
+        user = (d.get("member") or {}).get("user") or d.get("user") or {}
+        data = str((d.get("data") or {}).get("custom_id") or "")
+        is_choice = bool(self.hub) and data[:2] in ("a:", "d:")
+        allowed = is_choice and self.is_owner(Inbound(channel=self.name, chat_id=str(d.get("channel_id") or ""),
+                                                      text="", user_id=str(user.get("id") or "")))
+        if is_choice:
+            self.hub.button(self, data, user_id=str(user.get("id") or ""), chat_id=str(d.get("channel_id") or ""))
+        # every interaction must be answered within 3 s: the owner's tap replaces the buttons with the decision
+        if allowed:
+            verdict = "✅ Allowed" if data.startswith("a:") else "❌ Denied"
+            content = (((d.get("message") or {}).get("content") or "") + f"\n\n{verdict}")[-1990:]
+            reply = {"type": 7, "data": {"content": content, "components": []}}
+        else:
+            reply = {"type": 4, "data": {"content": "Only the owner can answer this.", "flags": 64}}
+        try:
+            self._rest("POST", f"/interactions/{d.get('id')}/{d.get('token')}/callback", reply, tries=1)
+        except Exception as e:
+            self.log(f"discord: could not answer the button: {e}")
 
 
 CHANNEL_TYPES: dict[str, type[Channel]] = {
@@ -797,21 +1512,53 @@ class WebhookServer:
     """One small HTTP server that routes <path> to the channel that owns it.
     Used by webhook-based channels (WhatsApp). Stdlib http.server."""
 
-    def __init__(self, host: str, port: int, routes: dict[str, Channel], *, log: Callable[[str], None] = print):
+    def __init__(self, host: str, port: int, routes: dict[str, Channel], *, log: Callable[[str], None] = print,
+                 media: Callable[[str], Path | None] | None = None):
         self.host, self.port, self.routes, self.log = host, port, routes, log
+        self.media = media  # token -> file, for /media/<token>/<name> links (hub.share_file)
         self._srv = None
         self._thread: threading.Thread | None = None
 
     def start(self) -> None:
         from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-        routes, log = self.routes, self.log
+        routes, log, media = self.routes, self.log, self.media
 
         class H(BaseHTTPRequestHandler):
             def log_message(self, *a):  # quiet
                 pass
 
+            def _media(self, base: str) -> None:
+                import mimetypes
+                token = base.split("/")[2] if base.count("/") >= 2 else ""
+                path = media(token) if (media and token) else None
+                if path is None:
+                    self.send_response(404)
+                    self.send_header("content-length", "0")
+                    self.end_headers()
+                    return
+                size = path.stat().st_size
+                self.send_response(200)
+                self.send_header("content-type", mimetypes.guess_type(path.name)[0] or "application/octet-stream")
+                self.send_header("content-length", str(size))
+                self.send_header("cache-control", "private, no-store")
+                self.end_headers()
+                if self.command != "HEAD":
+                    with open(path, "rb") as fh:
+                        shutil.copyfileobj(fh, self.wfile)
+
+            def do_HEAD(self):
+                base = urllib.parse.urlparse(self.path).path
+                if base.startswith("/media/"):
+                    self._media(base)
+                else:
+                    self.send_response(405)
+                    self.end_headers()
+
             def _route(self, method: str) -> None:
                 base = urllib.parse.urlparse(self.path).path
+                if method == "GET" and base.startswith("/media/"):
+                    self._media(base)
+                    return
                 ch = routes.get(base)
                 if not ch:
                     self.send_response(404)
@@ -1075,6 +1822,7 @@ class ChannelHub:
         self._turn = threading.Lock()         # held by the worker for a whole turn
         self._agents_lock = threading.Lock()  # get-or-create of per-chat agents
         self._started = time.time()
+        self._shared: dict[str, tuple[Path, float]] = {}  # share_file token -> (path, expires at)
 
     # --- intake ---
     def dispatch(self, channel: Channel, inbound: Inbound) -> None:
@@ -1105,6 +1853,37 @@ class ChannelHub:
             p.ok = ok
             p.event.set()
 
+    def button(self, channel: Channel, data: str, *, user_id: str = "", chat_id: str = "") -> bool:
+        """A tapped approval button ("a:<key>" / "d:<key>"). Only an owner's tap counts. True when it was one."""
+        if not (data.startswith("a:") or data.startswith("d:")):
+            return False
+        who = Inbound(channel=channel.name, chat_id=chat_id or user_id, text="", user_id=user_id)
+        if not channel.is_owner(who):
+            self.log(f"{channel.name}: ignored an approval tap from {user_id or chat_id or '?'} (not an owner)")
+            return True  # it was a button, just not theirs to press
+        self.resolve_approval(data[2:], data.startswith("a:"))
+        return True
+
+    # --- files handed out as links (channels that cannot upload, e.g. LINE) ---
+    SHARE_TTL = 3600.0
+
+    def share_file(self, path: Path, ttl: float | None = None) -> str:
+        """Serve one file from the webhook server for a while; returns its path ('/media/<token>/<name>')."""
+        if self._webhook is None:
+            raise RuntimeError("the webhook server is not running, so files cannot be shared as links")
+        now = time.time()
+        for t in [t for t, (_p, exp) in self._shared.items() if exp < now]:
+            self._shared.pop(t, None)
+        token = uuid.uuid4().hex + uuid.uuid4().hex
+        self._shared[token] = (Path(path), now + (ttl or self.SHARE_TTL))
+        return f"/media/{token}/{urllib.parse.quote(safe_filename(Path(path).name))}"
+
+    def shared(self, token: str) -> Path | None:
+        hit = self._shared.get(token)
+        if not hit or hit[1] < time.time() or not hit[0].is_file():
+            return None
+        return hit[0]
+
     # --- tool-call approval, routed to the chat being handled ---
     def approve(self, name: str, args: dict[str, Any]) -> bool:
         active = self._active
@@ -1117,11 +1896,13 @@ class ChannelHub:
         pending = self._pending[key] = _Pending(threading.Event())
         text = approval_text(name, args)
         minutes = max(1, round(self.approval_timeout / 60))
+        self._awaiting[(channel.name, chat_id)] = key  # a typed yes / no works on every channel
         try:
             if channel.supports_buttons:
-                channel.send(chat_id, text, buttons=[("✅ Allow", f"a:{key}"), ("❌ Deny", f"d:{key}")])
+                hint = {"matrix": f"React ✅ to allow or ❌ to deny (or reply yes / no) within {minutes} min."}.get(channel.kind, "")
+                channel.send(chat_id, text + (f"\n\n{hint}" if hint else ""),
+                             buttons=[("✅ Allow", f"a:{key}"), ("❌ Deny", f"d:{key}")])
             else:
-                self._awaiting[(channel.name, chat_id)] = key
                 channel.send(chat_id, text + f"\n\nReply yes to allow or no to deny (within {minutes} min; no reply = deny).")
         except Exception as e:
             self.log(f"{channel.name}: could not ask for approval: {e}")
@@ -1426,7 +2207,8 @@ class ChannelHub:
             if ch.webhook_path:
                 webhook_routes[ch.webhook_path] = ch
         if webhook_routes:
-            self._webhook = WebhookServer(self.webhook_host, self.webhook_port, webhook_routes, log=self.log)
+            self._webhook = WebhookServer(self.webhook_host, self.webhook_port, webhook_routes, log=self.log,
+                                          media=self.shared)
             self._webhook.start()
 
     def stop(self) -> None:
@@ -1472,7 +2254,8 @@ def add_send_file_tool(registry, hub: ChannelHub, workspace) -> None:
         "send_file",
         "Send a file to the owner in the chat: a report, spreadsheet, document, image, audio or archive you made or "
         "found. Images arrive as photos, .ogg as a voice note, mp3 as audio, mp4 as video, anything else as a "
-        "document (max 50 MB). Prefer this over pasting long content into the reply. Optional caption.",
+        "document (size limits: Telegram 50 MB, WhatsApp 100 MB, Discord 10 MB; LINE gets a download link). Prefer "
+        "this over pasting long content into the reply. Optional caption.",
         {"type": "object", "properties": {
             "path": {"type": "string", "description": "the file (in the workspace, or anywhere when file access is full)"},
             "caption": {"type": "string"},

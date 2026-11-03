@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.7.0 — every channel works like Telegram
+
+- **Files and voice in** on WhatsApp, Slack, Matrix, LINE and Discord: photos, documents,
+  archives, voice notes (transcribed and answered) — same inbox and readers as Telegram.
+- **Files and voice out** (`send_file`, voice replies) on WhatsApp, Slack, Matrix and
+  Discord; LINE sends images/audio/download links through `public_url` (links expire in 1 h).
+- **Approval buttons** everywhere: WhatsApp reply buttons, Slack Block Kit (Interactivity
+  webhook), LINE quick replies, Discord buttons, Matrix ✅ / ❌ reactions. Only an owner's
+  tap counts (Telegram included); a typed yes / no works on every channel.
+- **Discord is two-way:** Gateway websocket client in the standard library (heartbeat,
+  resume, reconnect, falls back to DMs when the Message Content intent is off), DMs and
+  @mentions in servers, rate limits waited out. Webhook-only configs keep working.
+- WhatsApp webhooks can be signature-checked (`app_secret`); downloads never send a bot
+  token to another host after a redirect and refuse login pages and oversized files.
+
 ## 0.6.0 — chat as the main way to use it
 
 - **Commands in chat:** `/new`, `/status`, `/model`, `/stop`, `/help` (Telegram menu).

@@ -106,6 +106,17 @@ def to_voice_ogg(src: Path, dest: Path) -> Path:
     return dest
 
 
+def to_m4a(src: Path, dest: Path) -> Path:
+    """Any audio -> AAC in .m4a (the only audio LINE plays)."""
+    if not ffmpeg_ok():
+        raise VoiceError("ffmpeg is needed to convert the audio (install ffmpeg)")
+    r = subprocess.run(["ffmpeg", "-loglevel", "error", "-y", "-i", str(src), "-vn", "-c:a", "aac", "-b:a", "64k",
+                        str(dest)], capture_output=True, timeout=300)
+    if r.returncode or not dest.exists():
+        raise VoiceError(f"ffmpeg could not convert the audio: {r.stderr.decode(errors='replace')[-200:]}")
+    return dest
+
+
 def _multipart(fields: dict[str, str], name: str, data: bytes, mime: str) -> tuple[bytes, str]:
     boundary = uuid.uuid4().hex
     out = b""

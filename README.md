@@ -4,7 +4,7 @@
 
 <p align="center">
   <a href="https://github.com/smooth-family/smooth-agent/actions/workflows/ci.yml"><img src="https://github.com/smooth-family/smooth-agent/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
-  <img src="https://img.shields.io/badge/version-0.6.0-5b8cff" alt="version 0.6.0">
+  <img src="https://img.shields.io/badge/version-0.7.0-5b8cff" alt="version 0.7.0">
   <img src="https://img.shields.io/badge/python-3.9%2B-3776AB?logo=python&logoColor=white" alt="Python 3.9+">
   <img src="https://img.shields.io/badge/channels-7-b65cff" alt="7 chat channels">
   <img src="https://img.shields.io/badge/docker-ready-2496ED?logo=docker&logoColor=white" alt="Docker">
@@ -123,15 +123,18 @@ Everything lives in `~/.smooth-agent/` (override with `SMOOTH_AGENT_HOME`):
 
 ## Chat channels
 
-| Channel | Direction | How it connects | What you need |
-|---|---|---|---|
-| **Telegram** | two-way, approval buttons | long-polling (no open port) | bot token from @BotFather |
-| **WhatsApp** | two-way | Meta Cloud API webhook | token, phone-number id, verify token |
-| **Slack** | two-way | Events API webhook (signed) | bot token, signing secret |
-| **Matrix** | two-way | `/sync` long-polling (no open port), any homeserver | bot access token |
-| **LINE** | two-way | Messaging API webhook (signed) | channel access token + secret |
-| **WeChat Work** | delivery | group robot webhook | robot URL |
-| **Discord** | delivery | channel webhook | webhook URL |
+| Channel | Direction | Approvals | Files & voice | How it connects | What you need |
+|---|---|---|---|---|---|
+| **Telegram** | two-way | buttons | in + out | long-polling (no open port) | bot token from @BotFather |
+| **WhatsApp** | two-way | reply buttons | in + out | Meta Cloud API webhook | token, phone-number id, verify token (+ app secret) |
+| **Slack** | two-way | Block Kit buttons | in + out | Events API + Interactivity webhook (signed) | bot token, signing secret |
+| **Discord** | two-way | buttons | in + out (10 MB) | Gateway websocket (no open port) | bot token |
+| **Matrix** | two-way | ✅ / ❌ reactions | in + out | `/sync` long-polling (no open port), any homeserver | bot access token |
+| **LINE** | two-way | quick-reply buttons | in; out as links | Messaging API webhook (signed) | channel access token + secret (+ `public_url`) |
+| **WeChat Work** | delivery | — | — | group robot webhook | robot URL |
+
+Every channel also takes a typed **yes / no** (ya, oke, gas / no, gak, batal) as the
+answer to an approval, and only an owner's tap counts.
 
 Pick them in `smooth-agent setup` (or `smooth-agent setup --channels telegram,slack`),
 then run `smooth-agent daemon`. Keys go in `~/.smooth-agent/.env`; the config only
@@ -150,7 +153,7 @@ auto_approve = false       # true = run your tool calls without the button tap
 - **Owner only.** Anyone not in `owners` gets a short "this agent is private"
   reply with their id, and nothing else.
 - **Approvals.** When the agent wants to run a command, you get the command
-  with ✅ Allow / ❌ Deny buttons (Telegram); unanswered requests are denied.
+  with ✅ Allow / ❌ Deny buttons (reactions on Matrix); unanswered requests are denied.
 - **One conversation per chat**, saved in `smooth.db`, resumed after a restart.
 - **One message at a time.** Turns are handled in order, so your model provider
   never sees a burst of parallel requests.
@@ -158,8 +161,17 @@ auto_approve = false       # true = run your tool calls without the button tap
   and scheduled jobs deliver their results:
   `smooth-agent cron add news "daily 07:00" "Top 5 tech stories" --deliver telegram`.
 - Webhook channels (WhatsApp, Slack, LINE) listen on port `8808`
-  (`/webhook/<channel>`); put it behind your HTTPS reverse proxy. Telegram and
-  Matrix need no open port.
+  (`/webhook/<channel>`); put it behind your HTTPS reverse proxy. Telegram,
+  Discord and Matrix need no open port.
+- **Slack:** point both *Event Subscriptions* and *Interactivity* at
+  `/webhook/slack`; scopes `chat:write`, `im:history`, `files:read`, `files:write`.
+- **Discord:** a bot token (`DISCORD_BOT_TOKEN`) gives two-way chat in DMs, and in
+  server channels when you @mention it (`guild_mode = "all"` answers every owner
+  message there). Turn on the *Message Content* intent for server channels. With
+  only `webhook_url` it stays a delivery target, as before.
+- **LINE** bots cannot upload files: set `public_url` to the HTTPS address of port
+  8808 and files go out as links that work for one hour (images and audio play
+  inline, other files are download links).
 
 Test a channel without the daemon: `smooth-agent channels test telegram "hello"`.
 
@@ -172,7 +184,7 @@ when the answer arrives.
 
 **Send it files.** Photos, PDFs, Word, Excel, PowerPoint, OpenDocument, zip,
 rar, 7z, tar — on Telegram just send them (an album counts as one message, a
-caption is the request). They land in `workspace/inbox/<date>/` and the agent
+caption is the request; WhatsApp, Slack, Discord, Matrix and LINE work the same way). They land in `workspace/inbox/<date>/` and the agent
 reads them: `read_file` turns documents into text (spreadsheets per sheet,
 tab-separated; a scanned PDF becomes page images for the vision model), photos go
 to the vision model, and `extract_archive` unpacks archives safely (no paths
@@ -185,10 +197,11 @@ protected archive). Old binary `.doc`/`.xls` need LibreOffice; RAR and 7z need
 (headings, tables, lists from Markdown) or `.xlsx` (several sheets, bold frozen
 header, numbers as numbers while phone numbers and IDs keep their leading zeros)
 with `create_document`, and sends it with `send_file` — images arrive as photos,
-`.ogg` as voice notes, everything else as a document (up to 50 MB).
+`.ogg` as voice notes, everything else as a document (Telegram 50 MB, WhatsApp
+100 MB, Discord 10 MB; LINE gets a link).
 
 **Talk to it.** Voice notes are transcribed and answered like typed messages
-(`[stt]`: OpenAI, Groq, a local whisper server or a gateway); with
+(`[stt]`: OpenAI, Groq, a local whisper server or a gateway) on every two-way channel; with
 `voice_replies = "auto"` a voice note gets the answer as text *and* as a voice note
 (`[tts]`, ffmpeg). Code and links are left out of the spoken version.
 
@@ -205,7 +218,7 @@ agent, when you ask it — write in them.
 By default the file tools stay inside the workspace. `[tools] files = "full"`
 lets them reach the whole machine (Linux, macOS, Windows): reading anywhere is
 free, while writing outside the workspace and reading files that hold secrets
-(`.env`, `~/.ssh`, `*.pem`, …) ask you first — on Telegram as ✅ / ❌ buttons.
+(`.env`, `~/.ssh`, `*.pem`, …) ask you first — as ✅ / ❌ buttons in the chat.
 `[tools] terminal = true` adds shell commands, each one approved the same way.
 
 ## Keep it running

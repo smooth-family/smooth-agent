@@ -141,7 +141,7 @@ def load_channels(cfg: dict[str, Any], *, env: dict[str, str] | None = None) -> 
     out = ChannelsConfig(enabled=enabled, webhook_host=str(section.get("webhook_host", "0.0.0.0")),
                          webhook_port=int(section.get("webhook_port", 8808)))
     default_token_env = {"telegram": "TELEGRAM_BOT_TOKEN", "whatsapp": "WHATSAPP_TOKEN", "slack": "SLACK_BOT_TOKEN",
-                         "matrix": "MATRIX_TOKEN", "line": "LINE_CHANNEL_TOKEN"}
+                         "matrix": "MATRIX_TOKEN", "line": "LINE_CHANNEL_TOKEN", "discord": "DISCORD_BOT_TOKEN"}
     for name in enabled:
         if name not in CHANNEL_TYPES:
             continue

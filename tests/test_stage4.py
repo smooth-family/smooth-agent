@@ -44,6 +44,13 @@ class DummyHub:
     def resolve_approval(self, key, ok):
         self.resolved.append((key, ok))
 
+    def log(self, msg):
+        pass
+
+    def button(self, channel, data, *, user_id="", chat_id=""):
+        from smooth_agent.channels import ChannelHub
+        return ChannelHub.button(self, channel, data, user_id=user_id, chat_id=chat_id)
+
 
 class ChatAgentSessionTests(unittest.TestCase):
     """Per-chat agents on a real runtime: session label, repair, resume and chat style."""
@@ -297,9 +304,11 @@ class TelegramParseTests(unittest.TestCase):
         tg._dispatch({"message": {"chat": {"id": 111}, "from": {"id": 111, "username": "me"}, "text": "hi there"}})
         self.assertEqual(len(hub.dispatched), 1)
         self.assertEqual((hub.dispatched[0].chat_id, hub.dispatched[0].text), ("111", "hi there"))
-        tg._dispatch({"callback_query": {"id": "q1", "data": "a:ABC123"}})
+        tg._dispatch({"callback_query": {"id": "q0", "data": "a:ABC123", "from": {"id": 999}}})
+        self.assertEqual(hub.resolved, [], "a tap from someone who is not an owner is ignored")
+        tg._dispatch({"callback_query": {"id": "q1", "data": "a:ABC123", "from": {"id": 111}}})
         self.assertEqual(hub.resolved, [("ABC123", True)])
-        tg._dispatch({"callback_query": {"id": "q2", "data": "d:ABC123"}})
+        tg._dispatch({"callback_query": {"id": "q2", "data": "d:ABC123", "from": {"id": 111}}})
         self.assertEqual(hub.resolved[-1], ("ABC123", False))
 
 
@@ -336,12 +345,15 @@ class WhatsAppWebhookTests(unittest.TestCase):
         wa.hub = hub
         payload = {"entry": [{"changes": [{"value": {"messages": [
             {"from": "628", "type": "text", "text": {"body": "hello"}},
-            {"from": "628", "type": "image", "image": {}},  # non-text ignored
+            {"from": "628", "type": "image", "image": {"id": "M1", "mime_type": "image/jpeg", "caption": "lihat"}},
+            {"from": "628", "type": "reaction", "reaction": {}},  # unsupported types are ignored
         ]}}]}]}
         status, _ = wa.handle_webhook("POST", "/webhook/whatsapp", {}, json.dumps(payload).encode())
         self.assertEqual(status, 200)
-        self.assertEqual(len(hub.dispatched), 1)
+        self.assertEqual(len(hub.dispatched), 2)
         self.assertEqual(hub.dispatched[0].text, "hello")
+        self.assertEqual((hub.dispatched[1].text, hub.dispatched[1].attachments[0]["kind"],
+                          hub.dispatched[1].attachments[0]["file_id"]), ("lihat", "photo", "M1"))
 
 
 def _slack_sig(secret, ts, body):
@@ -418,7 +430,7 @@ class MatrixTests(unittest.TestCase):
             "join": {"!r:hs": {"timeline": {"events": [
                 {"type": "m.room.message", "sender": "@me:hs", "content": {"msgtype": "m.text", "body": "hey"}},
                 {"type": "m.room.message", "sender": "@bot:hs", "content": {"msgtype": "m.text", "body": "echo"}},
-                {"type": "m.room.message", "sender": "@me:hs", "content": {"msgtype": "m.image", "body": "x.png"}},
+                {"type": "m.room.message", "sender": "@me:hs", "content": {"msgtype": "m.location", "body": "geo"}},
             ]}}},
             "invite": {
                 "!ok:hs": {"invite_state": {"events": [{"type": "m.room.member", "sender": "@me:hs", "content": {"membership": "invite"}}]}},
@@ -434,7 +446,7 @@ class MatrixTests(unittest.TestCase):
         from smooth_agent.channels import MatrixChannel
         ch = MatrixChannel(ChannelConfig("matrix", options={"token": "t"}), log=lambda m: None)
         calls = []
-        ch._req = lambda method, path, payload=None, **k: calls.append((method, path, payload)) or {}
+        ch._req = lambda method, path, payload=None, **k: calls.append((method, path, payload)) or {"event_id": "$e"}
         ch.send("!r:hs", "hello")
         self.assertEqual(calls[0][0], "PUT")
         self.assertIn("/rooms/%21r%3Ahs/send/m.room.message/", calls[0][1])

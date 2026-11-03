@@ -73,9 +73,8 @@ the config obvious, and every stage runnable by someone who just `git clone`d it
 
 Still to do:
 
-- Two-way Discord (bot gateway), Signal, MS Teams, Google Chat, Feishu/Lark,
-  Mattermost, email, SMS — on the same `Channel` base.
-- Approval buttons on Slack / LINE / Matrix (typed yes/no works today).
+- Signal, MS Teams, Google Chat, Feishu/Lark, Mattermost, email, SMS — on the
+  same `Channel` base. (Two-way Discord and buttons on every channel: Stage 6.)
 
 ## Stage 5 — Chat as the main way to use it (v0.6.0)
 
@@ -84,8 +83,16 @@ Still to do:
   `send_file`); voice notes in, optional voice replies.
 - Persona files, whole-machine file access with approvals, continued long answers.
 
-Still to do: receiving files and voice on WhatsApp, Slack, Matrix and LINE; approval buttons on
-Slack, LINE and Matrix.
+## Stage 6 — Every channel works like Telegram  ✅ (v0.7.0)
+
+- Files and voice in on WhatsApp, Slack, Matrix, LINE and Discord; files and voice out on
+  WhatsApp, Slack, Matrix and Discord (LINE through short-lived `public_url` links).
+- Approval buttons on every two-way channel (Matrix: reactions), owner-only taps, typed yes/no
+  everywhere.
+- Two-way Discord over the Gateway (stdlib websocket client).
+
+Still to do: Signal, MS Teams, Google Chat, Feishu/Lark, Mattermost, email, SMS; live progress
+messages on channels that can edit messages (Slack, Discord, Matrix).
 
 ## Later
 

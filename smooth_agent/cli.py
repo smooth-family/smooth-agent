@@ -305,16 +305,20 @@ def _strip_channels_table(text: str) -> str:
 _CHANNEL_TABLES = {
     "telegram": ('token_env = "TELEGRAM_BOT_TOKEN"\nowners = {owners}\nauto_approve = false\n',
                  "TELEGRAM_BOT_TOKEN (from @BotFather) and your numeric id in owners"),
-    "whatsapp": ('token_env = "WHATSAPP_TOKEN"\nphone_id = ""\nverify_token = ""\nowners = {owners}\n',
-                 "WHATSAPP_TOKEN, phone_id, verify_token; webhook -> <host>:8808/webhook/whatsapp"),
+    "whatsapp": ('token_env = "WHATSAPP_TOKEN"\nphone_id = ""\nverify_token = ""\napp_secret_env = "WHATSAPP_APP_SECRET"\nowners = {owners}\n',
+                 "WHATSAPP_TOKEN, phone_id, verify_token (+ WHATSAPP_APP_SECRET to check signatures); webhook -> <host>:8808/webhook/whatsapp"),
     "wechat": ('webhook_url_env = "WECHAT_ROBOT_URL"\nowners = ["robot"]\n', "WECHAT_ROBOT_URL (group robot)"),
     "slack": ('token_env = "SLACK_BOT_TOKEN"\nsigning_secret_env = "SLACK_SIGNING_SECRET"\nowners = {owners}\n',
-              "SLACK_BOT_TOKEN, SLACK_SIGNING_SECRET; events -> <host>:8808/webhook/slack"),
+              "SLACK_BOT_TOKEN, SLACK_SIGNING_SECRET; Event Subscriptions AND Interactivity -> <host>:8808/webhook/slack; "
+              "scopes chat:write, im:history, files:read, files:write"),
     "matrix": ('homeserver = "https://matrix.org"\ntoken_env = "MATRIX_TOKEN"\nowners = {owners}\n',
                "MATRIX_TOKEN (bot access token), homeserver, your @id in owners"),
-    "line": ('token_env = "LINE_CHANNEL_TOKEN"\nsecret_env = "LINE_CHANNEL_SECRET"\nowners = {owners}\n',
-             "LINE_CHANNEL_TOKEN, LINE_CHANNEL_SECRET; webhook -> <host>:8808/webhook/line"),
-    "discord": ('webhook_url_env = "DISCORD_WEBHOOK_URL"\n', "DISCORD_WEBHOOK_URL (channel webhook)"),
+    "line": ('token_env = "LINE_CHANNEL_TOKEN"\nsecret_env = "LINE_CHANNEL_SECRET"\npublic_url = ""\nowners = {owners}\n',
+             "LINE_CHANNEL_TOKEN, LINE_CHANNEL_SECRET; webhook -> <host>:8808/webhook/line; "
+             "public_url = your https address of port 8808 to send files"),
+    "discord": ('token_env = "DISCORD_BOT_TOKEN"\nowners = {owners}\nguild_mode = "mention"\n',
+                "DISCORD_BOT_TOKEN (Developer Portal → Bot; MESSAGE CONTENT intent for server channels) and your user id "
+                "in owners — or only webhook_url_env = \"DISCORD_WEBHOOK_URL\" for delivery"),
 }
 
 
@@ -350,7 +354,7 @@ def _setup_channels(cfg_path: Path, pick: str | None, steps, *, interactive: boo
     steps.ok("enabled " + ", ".join(names))
     for n in names:
         steps.note(f"{n}: {_CHANNEL_TABLES[n][1]}")
-    if any(n not in owners and n not in ("wechat", "discord") for n in names):
+    if any(n not in owners and n != "wechat" for n in names):
         steps.note("tip: message your bot once — it replies with the id to put in owners")
     return names
 
