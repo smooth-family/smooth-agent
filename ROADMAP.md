@@ -123,6 +123,22 @@ messages on channels that can edit messages (Slack, Discord, Matrix).
   `meeting-notes` (productivity) and `airdrop-tracker` (blockchain — the owner's own wallets, with
   change alerts and claim-page safety checks).
 
+## Stage 8.4 — Blockchain safety skills  ✅ (v0.11.0)
+
+- `bsc-contract-audit` (blockchain, optional): evidence-based, read-only due diligence on a BNB Smart
+  Chain address — token / NFT mint / deposit-refund lock escrow. Verification, privilege inventory,
+  sell/resell path, honeypot or mint simulation, holder distribution, LP lock, site-claim vs code diff,
+  a 100-point score and a machine-readable `DECISION: GO | CAUTION | BLOCK`. Adapted from
+  github.com/setyamickala/bsc-contract-audit-skill (MIT).
+- `launch-curve-audit` (blockchain, optional): the pre-launch companion — audits the *sale mechanism*
+  (bonding curve / tranche IEO, admission & escrow, graduation & LP custody) and returns a ship/hold/
+  block verdict. Same source (MIT).
+- `ai-agentic-mint-radar` (blockchain, optional): a 30-minute `cronjob` scan for new "AI agent" mints on
+  BNB Chain / EVM, kept to projects that pass five quality filters and a contract risk score, alerted
+  through a channel. Read-only — never mints, approves or signs.
+- All three are read-only (RPC reads + public APIs); they never sign or send a transaction, and hand off
+  deep per-contract verdicts to `bsc-contract-audit`.
+
 Next in Stage 8 (planned): desktop control / voice conversations / multi-tenant.
 
 ## Later

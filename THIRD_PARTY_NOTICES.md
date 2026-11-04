@@ -129,6 +129,36 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 ```
 
+BSC audit skills, github.com/setyamickala/bsc-contract-audit-skill — adapted in
+`optional/blockchain/bsc-contract-audit` and `optional/blockchain/launch-curve-audit`
+(read-only due-diligence auditors for BNB Smart Chain). Each skill carries this
+license in its own folder's LICENSE file; only the front matter was adapted for the
+Smooth Agent skill loader, the method and scripts are unchanged:
+
+```
+MIT License
+
+Copyright (c) 2026 setyamickala (https://github.com/setyamickala)
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+```
+
 ## Not bundled
 
 The data broker list BADBOOL (Big-Ass Data Broker Opt-Out List, Yael Grauer,

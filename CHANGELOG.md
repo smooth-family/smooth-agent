@@ -1,5 +1,23 @@
 # Changelog
 
+## 0.11.0 — blockchain safety skills
+
+- **`bsc-contract-audit`** (blockchain, optional): evidence-based, read-only due diligence on a BNB
+  Smart Chain (chain 56) address — token (BEP-20), NFT mint (BEP-721/1155), or deposit-refund lock
+  escrow. Verification status, live privilege inventory, sell/resell path, honeypot or mint simulation,
+  holder distribution, LP lock, site-claim vs code diff, with the Binance Web3 audit API as one input —
+  then a 100-point score, a verdict, and a machine-readable `DECISION: GO | CAUTION | BLOCK` line a
+  wallet can gate on.
+- **`launch-curve-audit`** (blockchain, optional): the pre-launch companion — audits the sale mechanism
+  (bonding curve / tranche IEO, admission & escrow, graduation & LP custody, coupled emissions) and
+  returns a ship/hold/block verdict with a finding register.
+- **`ai-agentic-mint-radar`** (blockchain, optional): a 30-minute `cronjob` scan for new "AI agent"
+  mints on BNB Chain / EVM; alerts only projects that pass five quality filters and a contract risk
+  score, delivered through a channel.
+- All three are **read-only** — RPC reads and public APIs only, never signing or sending a transaction,
+  and never asking for a key or seed. `bsc-contract-audit` and `launch-curve-audit` are adapted from
+  github.com/setyamickala/bsc-contract-audit-skill (MIT; see THIRD_PARTY_NOTICES.md).
+
 ## 0.10.0 — more connectors
 
 - **Calendar** (`calendar`): the owner's Google Calendar (OAuth token) or any CalDAV server
