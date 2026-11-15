@@ -21,6 +21,16 @@ from typing import Any
 
 from .tools import ToolError, Registry
 
+
+def _toint(v, default=0):
+    """Integer from a tool argument; models often send 40.0 or "40.0" for 40."""
+    if v is None or v == "":
+        return default
+    try:
+        return int(v)
+    except (TypeError, ValueError):
+        return int(float(v))
+
 MAX_SESSIONS = 32
 LOG_CAP_BYTES = 20_000_000  # per process; older output is dropped from the head when read
 
@@ -155,12 +165,12 @@ def add_process_tools(reg: Registry, pm: ProcessManager) -> None:
         if action == "log":
             text, _ = pm._read(s, 0, LOG_CAP_BYTES)
             lines = text.splitlines()
-            off, lim = int(args.get("offset") or -200), int(args.get("limit") or 200)
+            off, lim = _toint(args.get("offset"), -200), _toint(args.get("limit"), 200)
             start = len(lines) + off if off < 0 else max(0, off - 1)
             start = max(0, start)
             return f"{pm.status(s)}\n" + "\n".join(lines[start:start + lim])
         if action == "wait":
-            t = max(1, min(int(args.get("timeout") or 60), 600))
+            t = max(1, min(_toint(args.get("timeout"), 60), 600))
             try:
                 s.proc.wait(timeout=t)
             except subprocess.TimeoutExpired:

@@ -126,11 +126,16 @@ class Agent:
 
     # ---------- history ----------
 
-    def _push(self, msg: dict[str, Any]) -> None:
+    def _push(self, msg: dict[str, Any], c: Any = None) -> None:
         self.history.append(msg)
         if self.store is not None and self.session_id:
             try:
-                self.store.add_message(self.session_id, msg)
+                saved = dict(msg)
+                if c is not None:  # provider-reported usage + model, kept in the record only (never sent back)
+                    saved["_usage"] = dict(getattr(c, "usage", None) or {})
+                    saved["_model"] = getattr(c, "model", "") or ""
+                    saved["_provider"] = getattr(c, "provider", "") or ""
+                self.store.add_message(self.session_id, saved)
             except Exception as e:  # saving must never break the turn
                 self.on_event("error", {"message": f"could not save the message: {e}"})
 
@@ -138,7 +143,8 @@ class Agent:
         """Continue a saved session: load its messages (the system prompt is rebuilt)."""
         if self.store is None:
             raise ValueError("no store configured")
-        msgs = [m for m in self.store.session_messages(session_id) if m.get("role") != "system"]
+        msgs = [{k: v for k, v in m.items() if not k.startswith("_")}
+                for m in self.store.session_messages(session_id) if m.get("role") != "system"]
         self.session_id = session_id
         self.history = [{"role": "system", "content": self._system_prompt()}] + msgs
         return len(msgs)
@@ -215,7 +221,7 @@ class Agent:
                 self.on_event("error", {"message": f"could not continue the answer: {e}"})
                 break
             self._count(c, usage_total)
-            self._push(c.message or {"role": "assistant", "content": c.text})
+            self._push(c.message or {"role": "assistant", "content": c.text}, c)
             text += c.text or ""
         return text
 
@@ -258,14 +264,14 @@ class Agent:
 
             if not c.tool_calls:
                 # a plain answer ends the turn
-                self._push(c.message or {"role": "assistant", "content": c.text})
+                self._push(c.message or {"role": "assistant", "content": c.text}, c)
                 text = self._continue_if_cut(c, usage_total)
                 if text:
                     self.on_event("text", {"text": text})
                 return Turn(text=text, steps=step, tool_calls=used, usage=usage_total)
 
             # record the assistant's tool-call message, then run each call
-            self._push(c.message or {"role": "assistant", "content": c.text or None, "tool_calls": c.tool_calls})
+            self._push(c.message or {"role": "assistant", "content": c.text or None, "tool_calls": c.tool_calls}, c)
             for call in c.tool_calls:
                 fn = (call.get("function") or {})
                 name = fn.get("name", "")
@@ -275,6 +281,16 @@ class Agent:
                 else:
                     self.on_event("tool", {"name": name, "arguments": args})
                     result = self.registry.run(name, args) if self.registry else "error: no tools available"
+                    same = 0
+                    for prev in reversed(used):
+                        if prev == {"name": name, "arguments": args}:
+                            same += 1
+                        else:
+                            break
+                    if same >= 2 and isinstance(result, str):
+                        result = (NOTICE + f"You have now made this exact {name} call {same + 1} times in a row and "
+                                  "got the same kind of result. Repeating it will not change anything: read the "
+                                  "result below, then take a different next step.\n\n" + result)
                 used.append({"name": name, "arguments": args})
                 self.on_event("tool_result", {"name": name, "result": result})
                 self._push({
@@ -288,7 +304,7 @@ class Agent:
                     "give your best final answer now: what is done, what you found, and what is left."})
         try:
             c = self.router.complete(self.history, provider=self.provider, model=self.model, max_tokens=self.max_tokens)
-            self._push(c.message or {"role": "assistant", "content": c.text})
+            self._push(c.message or {"role": "assistant", "content": c.text}, c)
             return Turn(text=c.text, steps=self.max_steps, tool_calls=used, usage=usage_total, stopped="max_steps")
         except RouterError as e:
             return Turn(text=f"(stopped after {self.max_steps} steps; {e})", steps=self.max_steps,

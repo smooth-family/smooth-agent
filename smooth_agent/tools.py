@@ -31,6 +31,16 @@ from typing import Any, Callable
 from .guard import scrubbed_env
 
 
+def _toint(v, default=0):
+    """Integer from a tool argument; models often send 40.0 or "40.0" for 40."""
+    if v is None or v == "":
+        return default
+    try:
+        return int(v)
+    except (TypeError, ValueError):
+        return int(float(v))
+
+
 class ToolError(Exception):
     """Raised by a handler when it cannot do what was asked; the message goes
     back to the model so it can recover instead of the turn crashing."""
@@ -240,7 +250,7 @@ def _json_request(url: str, *, headers: dict[str, str], body: dict[str, Any] | N
 def web_search(query: str, limit: int = 5, *, backend: str = "auto", env: dict[str, str] | None = None) -> list[dict[str, str]]:
     """[{title, url, snippet}] from Tavily / Brave / SearXNG (when configured) or DuckDuckGo (no key)."""
     env = env if env is not None else dict(os.environ)
-    limit = max(1, min(int(limit or 5), 10))
+    limit = max(1, min(_toint(limit, 5), 10))
     if backend == "auto":
         backend = ("tavily" if env.get("TAVILY_API_KEY") else "brave" if env.get("BRAVE_API_KEY")
                    else "searxng" if env.get("SEARXNG_URL") else "duckduckgo")
@@ -387,8 +397,8 @@ def default_registry(workspace: Workspace, *, allow_http: bool = True, terminal:
             if p.stat().st_size > MAX_READ_BYTES:
                 text += f"\n...[truncated at {MAX_READ_BYTES} bytes; use offset/limit to read further]"
             return text
-        start = max(1, int(args.get("offset") or 1))
-        limit = max(1, min(int(args.get("limit") or 400), 5000))
+        start = max(1, _toint(args.get("offset"), 1))
+        limit = max(1, min(_toint(args.get("limit"), 400), 5000))
         out, total = [], 0
         with open(p, encoding="utf-8", errors="replace") as fh:
             for i, line in enumerate(fh, 1):
@@ -406,8 +416,8 @@ def default_registry(workspace: Workspace, *, allow_http: bool = True, terminal:
             return text if len(text) <= MAX_READ_BYTES else (
                 text[:MAX_READ_BYTES] + f"\n...[cut at {MAX_READ_BYTES} characters; use offset/limit to read further]")
         lines = text.splitlines()
-        start = max(1, int(args.get("offset") or 1))
-        limit = max(1, min(int(args.get("limit") or 400), 5000))
+        start = max(1, _toint(args.get("offset"), 1))
+        limit = max(1, min(_toint(args.get("limit"), 400), 5000))
         chunk = [f"{i:6}\t{ln}" for i, ln in enumerate(lines[start - 1:start - 1 + limit], start)]
         more = f"\n...[{len(lines) - (start + limit - 1)} more lines]" if len(lines) >= start + limit else ""
         return "\n".join(chunk) + more if chunk else f"(no lines: it has {len(lines)} lines)"
@@ -555,7 +565,7 @@ def default_registry(workspace: Workspace, *, allow_http: bool = True, terminal:
     def _search_files(args: dict[str, Any]) -> str:
         import fnmatch
         base = workspace.resolve(args.get("path") or ".")
-        limit = max(1, min(int(args.get("limit") or 100), 1000))
+        limit = max(1, min(_toint(args.get("limit"), 100), 1000))
         pattern = str(args["pattern"])
         glob = args.get("file_glob")
         skip_dirs = {".git", "node_modules", "__pycache__", ".venv", "venv"}
@@ -653,7 +663,7 @@ def default_registry(workspace: Workspace, *, allow_http: bool = True, terminal:
              "required": ["query"]},
         )
         def _web_search(args: dict[str, Any]) -> str:
-            res = web_search(str(args["query"]), int(args.get("limit") or 5), backend=search_backend)
+            res = web_search(str(args["query"]), _toint(args.get("limit"), 5), backend=search_backend)
             if not res:
                 return "(no results)"
             return "\n\n".join(f"{i}. {r['title']}\n{r['url']}\n{r['snippet'][:300]}" for i, r in enumerate(res, 1))
@@ -713,7 +723,7 @@ def default_registry(workspace: Workspace, *, allow_http: bool = True, terminal:
             command = str(args.get("command") or "").strip()
             if not command:
                 raise ToolError("command is empty")
-            t = max(1, min(int(args.get("timeout") or limit), TERMINAL_MAX_TIMEOUT))
+            t = max(1, min(_toint(args.get("timeout"), limit), TERMINAL_MAX_TIMEOUT))
             cwd = workspace.resolve(args.get("workdir") or ".")
             if not cwd.is_dir():
                 raise ToolError(f"workdir does not exist: {args.get('workdir')}")
