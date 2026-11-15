@@ -117,7 +117,7 @@ class Agent:
                  processes: Any = None, store: Any = None, memory: Any = None, session_id: str | None = None,
                  context_tokens: int = 64_000, keep_recent: int = 10, model: str | None = None,
                  persona_dirs: list[Any] | None = None, max_continues: int = 2, keep_going: int = 0,
-                 retry_seconds: int = 180, keep_going_mode: str = "marker"):
+                 retry_seconds: int = 180, keep_going_mode: str = "marker", loop_abort: int = 0):
         self.router = router
         self.registry = registry
         self.system = system
@@ -138,6 +138,7 @@ class Agent:
         self.max_continues = max_continues            # extra calls when an answer is cut off at max_tokens
         self.keep_going = keep_going                  # autonomous: nudges when the model stops before TASK COMPLETE
         self.keep_going_mode = keep_going_mode        # "marker": until TASK COMPLETE; "smart": only plans/promises
+        self.loop_abort = loop_abort                  # end the turn when one exact call repeats this many times (0 = off)
         self.stream = False                           # stream answers as "delta" events (set by a chat channel)
         self.retry_seconds = retry_seconds            # wait this long in total on busy/rate-limited models
         self.retry_first, self.retry_max = 5, 60      # seconds between those tries: 5, 10, 20, 40, 60, …
@@ -443,6 +444,11 @@ class Agent:
                     "tool_call_id": call.get("id") or f"call_{step}_{name}",
                     "content": result if isinstance(result, str) else json.dumps(result),
                 })
+            if self.loop_abort and len(used) >= self.loop_abort and all(u == used[-1] for u in used[-self.loop_abort:]):
+                # stuck: the same call over and over despite the notice; a fresh session does better than more of this
+                self.on_event("error", {"message": f"stopped: the same {used[-1]['name']} call {self.loop_abort} times in a row"})
+                return Turn(text=f"(stopped: repeated the same {used[-1]['name']} call {self.loop_abort} times)",
+                            steps=step, tool_calls=used, usage=usage_total, stopped="loop")
 
         # out of steps: ask once more without tools for a closing answer
         self._push({"role": "user", "content": NOTICE + "You are out of tool steps for this message. Stop using tools and "

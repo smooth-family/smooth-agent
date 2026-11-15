@@ -224,5 +224,21 @@ class SmartKeepGoingTests(unittest.TestCase):
             self.assertFalse(looks_unfinished(s), s)
 
 
+class LoopAbortTests(unittest.TestCase):
+    def test_same_call_repeated_ends_the_turn(self):
+        reg = Registry()
+        reg.tool("ls", "ls", {"type": "object", "properties": {}})(lambda a: "same listing")
+        script = [call("ls", cid=f"c{i}") for i in range(20)]
+        turn = Agent(StubRouter(lambda m: script.pop(0)), reg, loop_abort=4, max_steps=20).run("go")
+        self.assertEqual(turn.stopped, "loop")
+        self.assertEqual(len(turn.tool_calls), 4)
+
+    def test_off_by_default(self):
+        reg = Registry()
+        reg.tool("ls", "ls", {"type": "object", "properties": {}})(lambda a: "same")
+        script = [call("ls", cid=f"c{i}") for i in range(6)] + [answer("done")]
+        self.assertEqual(Agent(StubRouter(lambda m: script.pop(0)), reg, max_steps=20).run("go").text, "done")
+
+
 if __name__ == "__main__":
     unittest.main()

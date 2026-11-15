@@ -77,6 +77,7 @@ class Settings:
     keep_going: int = 0            # autonomous: nudge a model that stops before saying TASK COMPLETE
     keep_going_mode: str = "marker"  # "marker": until TASK COMPLETE; "smart": only replies that read as plans
     retry_seconds: int = 180       # wait (in total) on busy / rate-limited models before giving up
+    loop_abort: int = 0            # end a turn when the exact same tool call repeats this many times (0 = off)
     max_tokens: int = 4096         # reasoning models spend part of this thinking
     instructions: str = ""         # extra system instructions from the owner
     timezone: str = ""             # e.g. "Asia/Jakarta"; default: the machine's
@@ -103,7 +104,7 @@ class Settings:
     def from_config(cls, cfg: dict[str, Any]) -> "Settings":
         a, t = cfg.get("agent") or {}, cfg.get("tools") or {}
         return cls(
-            workspace=str(a.get("workspace", "")), max_steps=int(a.get("max_steps", 40)), keep_going=int(a.get("keep_going", 0)), keep_going_mode=str(a.get("keep_going_mode", "marker")), retry_seconds=int(a.get("retry_seconds", 180)),
+            workspace=str(a.get("workspace", "")), max_steps=int(a.get("max_steps", 40)), keep_going=int(a.get("keep_going", 0)), keep_going_mode=str(a.get("keep_going_mode", "marker")), retry_seconds=int(a.get("retry_seconds", 180)), loop_abort=int(a.get("loop_abort", 0)),
             max_tokens=int(a.get("max_tokens", 4096)), instructions=str(a.get("instructions", "")),
             timezone=str(a.get("timezone", "")), context_tokens=int(a.get("context_tokens", 64000)),
             keep_recent=int(a.get("keep_recent", 10)), memory=bool(a.get("memory", True)),
