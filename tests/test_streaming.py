@@ -144,5 +144,54 @@ class DraftRenderTests(unittest.TestCase):
         self.assertNotIn("✍️", p._render())
 
 
+class EmptyResponseTests(unittest.TestCase):
+    def prov(self, base, name="p"):
+        return Provider.from_config(name, {"provider": "openai-compatible", "model": "m", "base_url": base, "key_env": "K"}, env={"K": "s"})
+
+    def test_empty_stream_falls_back(self):
+        srv1, bad = start_server({"/chat/completions": (200, "")})
+        srv2, good = start_server({"/chat/completions": lambda r: (200, sse({"choices": [{"delta": {"content": "ok"}}]}))})
+        try:
+            r = Router([self.prov(bad, "a"), self.prov(good, "b")], fallbacks=["b"])
+            self.assertEqual(r.complete([{"role": "user", "content": "x"}], on_text=lambda s: None).text, "ok")
+        finally:
+            srv1.shutdown(); srv2.shutdown()
+
+    def test_empty_or_html_body_falls_back_without_streaming(self):
+        srv1, bad = start_server({"/chat/completions": (200, "<html>502 Bad gateway</html>")})
+        srv2, good = start_server({"/chat/completions": (200, json.dumps({"choices": [{"message": {"content": "ok"}, "finish_reason": "stop"}]}))})
+        try:
+            r = Router([self.prov(bad, "a"), self.prov(good, "b")], fallbacks=["b"])
+            self.assertEqual(r.complete([{"role": "user", "content": "x"}]).text, "ok")
+        finally:
+            srv1.shutdown(); srv2.shutdown()
+
+    def test_empty_stream_alone_is_a_retryable_error(self):
+        from smooth_agent.routers import RouterError
+        with self.assertRaises(RouterError) as cm:
+            _openai_stream([], lambda s: None)
+        self.assertTrue(cm.exception.retryable)
+
+
+class CooldownTests(unittest.TestCase):
+    def test_a_failed_provider_is_tried_last_for_a_while(self):
+        calls = {"a": 0}
+
+        def bad(req):
+            calls["a"] += 1
+            return 503, "busy"
+        srv1, a = start_server({"/chat/completions": bad})
+        srv2, b = start_server({"/chat/completions": (200, json.dumps({"choices": [{"message": {"content": "ok"}, "finish_reason": "stop"}]}))})
+        try:
+            mk = lambda base, n: Provider.from_config(n, {"provider": "openai-compatible", "model": "m", "base_url": base, "key_env": "K"}, env={"K": "s"})
+            r = Router([mk(a, "a"), mk(b, "b")], fallbacks=["b"])
+            for _ in range(3):
+                self.assertEqual(r.complete([{"role": "user", "content": "x"}]).text, "ok")
+            self.assertEqual(calls["a"], 1)  # skipped to the end after the first failure
+            self.assertEqual([p.name for p in r.chain()], ["b", "a"])
+        finally:
+            srv1.shutdown(); srv2.shutdown()
+
+
 if __name__ == "__main__":
     unittest.main()

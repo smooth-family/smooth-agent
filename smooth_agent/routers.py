@@ -287,10 +287,24 @@ class Router:
         provs = [Provider.from_config(name, pc, env=env) for name, pc in (cfg.get("providers") or {}).items()]
         return cls(provs, default=cfg.get("default"), fallbacks=cfg.get("fallbacks"))
 
+    COOLDOWN = 120.0  # seconds a provider that just failed (retryable) is tried last
+
     def chain(self, name: str | None = None) -> list[Provider]:
+        """Providers in try order: the chosen one, then the fallbacks; any that failed in the last
+        COOLDOWN seconds move to the end (still tried, so nothing is lost if all are down)."""
         first = name or self.default
         order = [first] + [f for f in self.fallbacks if f != first]
-        return [self.providers[n] for n in order if n in self.providers]
+        provs = [self.providers[n] for n in order if n in self.providers]
+        down = getattr(self, "_down", {})
+        now = time.time()
+        return [p for p in provs if down.get(p.name, 0) <= now] + [p for p in provs if down.get(p.name, 0) > now]
+
+    def _mark(self, p: "Provider", ok: bool) -> None:
+        down = self.__dict__.setdefault("_down", {})
+        if ok:
+            down.pop(p.name, None)
+        else:
+            down[p.name] = time.time() + self.COOLDOWN
 
     def complete(self, messages: list[dict[str, Any]], *, provider: str | None = None, model: str | None = None,
                  max_tokens: int = 1024, extra: dict[str, Any] | None = None,
@@ -307,12 +321,17 @@ class Router:
             try:
                 if on_text is not None:
                     try:
-                        return self._stream_one(p, messages, model or p.model, max_tokens, extra or {}, on_text)
+                        c = self._stream_one(p, messages, model or p.model, max_tokens, extra or {}, on_text)
                     except RouterError:
                         on_text(None)  # the reader's draft restarts with the next attempt
                         raise
-                return self._complete_one(p, messages, model or p.model, max_tokens, extra or {})
+                else:
+                    c = self._complete_one(p, messages, model or p.model, max_tokens, extra or {})
+                self._mark(p, True)
+                return c
             except RouterError as e:
+                if e.retryable:
+                    self._mark(p, False)  # busy / down: try it last for a while
                 last = e
                 if not e.retryable:
                     # a bad request / auth error will fail the same way on a retry of this provider
@@ -336,10 +355,18 @@ class Router:
         raw = resp.read().decode("utf-8")
         # Some gateways append a trailing SSE "[DONE]" even to a non-stream body.
         raw = raw.replace("data: [DONE]", "").strip()
-        j = json.loads(raw)
+        try:
+            j = json.loads(raw)
+        except json.JSONDecodeError:
+            raise RouterError(f"unreadable response from the provider: {raw[:160]!r}", retryable=True) from None
+        if j.get("error"):
+            err = j["error"]
+            raise RouterError(f"upstream: {err.get('message', 'error') if isinstance(err, dict) else err}", retryable=True)
         choice = (j.get("choices") or [{}])[0]
         message = choice.get("message") or {}
         text = message.get("content") or ""
+        if not text and not message.get("tool_calls") and not choice.get("finish_reason"):
+            raise RouterError("empty response from the provider (no text, no tool call)", retryable=True)
         return Completion(text=text, model=model, provider=p.name, usage=j.get("usage", {}) or {},
                           first_ms=int((time.time() - t0) * 1000),
                           tool_calls=list(message.get("tool_calls") or []),
@@ -487,6 +514,8 @@ def _openai_stream(lines: Iterable[tuple[str, str]], emit: Callable[[str], None]
         m = ch.get("message") or {}
         emit(m.get("content") or "")
         return m.get("content") or "", list(m.get("tool_calls") or []), m, ch.get("finish_reason"), j.get("usage") or {}
+    if not text and not slots and not raw and finish is None:
+        raise RouterError("empty response from the provider (no text, no tool call)", retryable=True)
     calls = []
     for n, (_, s) in enumerate(sorted(slots.items())):
         s["id"] = s["id"] or f"call_stream_{int(time.time() * 1000)}_{n}"
