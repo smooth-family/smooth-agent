@@ -73,7 +73,8 @@ class Settings:
     """[agent] and [tools] from smooth-agent.toml, with safe defaults."""
 
     workspace: str = ""            # default: ./workspace
-    max_steps: int = 12
+    max_steps: int = 40
+    keep_going: int = 0            # autonomous: nudge a model that stops before saying TASK COMPLETE
     max_tokens: int = 4096         # reasoning models spend part of this thinking
     instructions: str = ""         # extra system instructions from the owner
     timezone: str = ""             # e.g. "Asia/Jakarta"; default: the machine's
@@ -98,7 +99,7 @@ class Settings:
     def from_config(cls, cfg: dict[str, Any]) -> "Settings":
         a, t = cfg.get("agent") or {}, cfg.get("tools") or {}
         return cls(
-            workspace=str(a.get("workspace", "")), max_steps=int(a.get("max_steps", 12)),
+            workspace=str(a.get("workspace", "")), max_steps=int(a.get("max_steps", 40)), keep_going=int(a.get("keep_going", 0)),
             max_tokens=int(a.get("max_tokens", 4096)), instructions=str(a.get("instructions", "")),
             timezone=str(a.get("timezone", "")), context_tokens=int(a.get("context_tokens", 64000)),
             keep_recent=int(a.get("keep_recent", 10)), memory=bool(a.get("memory", True)),

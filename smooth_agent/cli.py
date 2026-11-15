@@ -111,6 +111,8 @@ def _runtime(args):
         overrides["http"] = False
     if getattr(args, "terminal", False):
         overrides["terminal"] = True
+    if getattr(args, "keep_going", None) is not None:
+        overrides["keep_going"] = args.keep_going
     cfg_confirm = True
     try:
         cfg_confirm = Settings.from_config(load_config(args.config)).confirm
@@ -1128,6 +1130,8 @@ def _add_agent_args(sp) -> None:
     sp.add_argument("-p", "--provider", help="provider name (default from config)")
     sp.add_argument("-w", "--workspace", help="workspace directory the agent works in (default ~/.smooth-agent/workspace)")
     sp.add_argument("--max-steps", type=int, default=0, help="max tool-call rounds per message (default from config)")
+    sp.add_argument("--keep-going", type=int, default=None, metavar="N",
+                    help="autonomous: up to N times, send a model that stops early back to work until it says TASK COMPLETE")
     sp.add_argument("--no-http", action="store_true", help="disable web tools")
     sp.add_argument("--terminal", action="store_true", help="enable terminal + execute_code for this run")
     sp.add_argument("-y", "--yes", action="store_true", help="run terminal / execute_code without asking")

@@ -20,7 +20,9 @@ model = "deepseek-chat"       # MODEL
 [agent]
 # workspace = "~/smooth-workspace"   # the folder the agent reads and writes (default ~/.smooth-agent/workspace,
                                      # where SOUL.md, IDENTITY.md, USER.md, AGENTS.md, TOOLS.md, MEMORY.md live)
-max_steps = 12                        # tool rounds per message
+max_steps = 40                        # tool rounds per message
+# keep_going = 0                      # autonomous: send a model that stops early back to work, up to N times,
+                                      # until it ends with TASK COMPLETE (only after it has used tools)
 max_tokens = 4096                     # per reply; reasoning models think inside this budget
 # instructions = "Answer in Indonesian. Keep replies short."
 # timezone = "Asia/Jakarta"          # for schedules and "tomorrow at 9" (default: this machine's)
@@ -77,6 +79,7 @@ webhook_port = 8808    # inbound webhook server (WhatsApp); expose it with a rev
 # owners = ["123456789"]             # your numeric Telegram id
 # auto_approve = false               # approve the owner's tool calls without a button tap
 # voice_replies = "auto"            # off | auto (voice note in -> voice note back) | always; needs [tts] + ffmpeg
+# stream = "on"                     # stream the answer into the live progress message as it is written
 
 # [channels.whatsapp]                # Meta WhatsApp Cloud API; point the webhook at <host>/webhook/whatsapp
 # token_env = "WHATSAPP_TOKEN"

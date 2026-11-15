@@ -23,7 +23,7 @@ import time
 import urllib.error
 import urllib.request
 from dataclasses import dataclass, field, replace
-from typing import Any, Iterable, Iterator
+from typing import Any, Callable, Iterable, Iterator
 
 
 class RouterError(RuntimeError):
@@ -293,14 +293,24 @@ class Router:
         return [self.providers[n] for n in order if n in self.providers]
 
     def complete(self, messages: list[dict[str, Any]], *, provider: str | None = None, model: str | None = None,
-                 max_tokens: int = 1024, extra: dict[str, Any] | None = None) -> Completion:
-        """Non-streaming completion. Tries the chosen provider, then fallbacks."""
+                 max_tokens: int = 1024, extra: dict[str, Any] | None = None,
+                 on_text: Callable[[str | None], None] | None = None) -> Completion:
+        """A completion from the chosen provider, then the fallbacks. With `on_text`, the answer is
+        streamed: on_text gets each text delta as it arrives (and None when an attempt is abandoned
+        for the next provider), while tool calls are assembled from their deltas; the result is the
+        same Completion a non-streaming call returns."""
         last: RouterError | None = None
         for p in self.chain(provider):
             if not p.ready:
                 last = RouterError(f"provider '{p.name}' has no key ({p.key_env or 'n/a'})")
                 continue
             try:
+                if on_text is not None:
+                    try:
+                        return self._stream_one(p, messages, model or p.model, max_tokens, extra or {}, on_text)
+                    except RouterError:
+                        on_text(None)  # the reader's draft restarts with the next attempt
+                        raise
                 return self._complete_one(p, messages, model or p.model, max_tokens, extra or {})
             except RouterError as e:
                 last = e
@@ -334,6 +344,35 @@ class Router:
                           first_ms=int((time.time() - t0) * 1000),
                           tool_calls=list(message.get("tool_calls") or []),
                           finish_reason=choice.get("finish_reason"), message=message)
+
+    def _stream_one(self, p: Provider, messages, model, max_tokens, extra, on_text) -> Completion:
+        t0 = time.time()
+        first_ms: list[int] = []
+
+        def emit(s: str) -> None:
+            if s:
+                if not first_ms:
+                    first_ms.append(int((time.time() - t0) * 1000))
+                on_text(s)
+
+        if p.wire == "anthropic":
+            body = _to_anthropic_body(messages, model, max_tokens, True, extra)
+            resp = _request(f"{p.base_url}/v1/messages", _auth_headers(p), body, p.timeout)
+            text, calls, message, finish, usage = _anthropic_stream(_sse_lines(resp), emit)
+        else:
+            body = {"model": model, "messages": messages, "max_tokens": max_tokens, "stream": True,
+                    "stream_options": {"include_usage": True}, **extra}
+            try:
+                resp = _request(f"{p.base_url}/chat/completions", _auth_headers(p), body, p.timeout)
+            except RouterError as e:
+                if e.status != 400:
+                    raise
+                body.pop("stream_options")  # some gateways refuse it: stream without usage then
+                resp = _request(f"{p.base_url}/chat/completions", _auth_headers(p), body, p.timeout)
+            text, calls, message, finish, usage = _openai_stream(_sse_lines(resp), emit)
+        return Completion(text=text, model=model, provider=p.name, usage=usage,
+                          first_ms=first_ms[0] if first_ms else int((time.time() - t0) * 1000),
+                          tool_calls=calls, finish_reason=finish, message=message)
 
     def provider(self, name: str | None = None) -> Provider:
         p = self.providers.get(name or self.default)
@@ -380,6 +419,131 @@ def _sse_events(resp) -> Iterator[str]:
             line = line.strip()
             if line.startswith(b"data:"):
                 yield line[5:].strip().decode("utf-8", "replace")
+
+
+def _sse_lines(resp) -> Iterator[tuple[str, str]]:
+    """("data", payload) for each SSE data line, ("raw", line) for anything else (a gateway that
+    ignores stream=true answers one plain JSON body)."""
+    buf = b""
+    for chunk in iter(lambda: resp.read(1024), b""):
+        buf += chunk
+        while b"\n" in buf:
+            line, buf = buf.split(b"\n", 1)
+            line = line.strip()
+            if line.startswith(b"data:"):
+                yield "data", line[5:].strip().decode("utf-8", "replace")
+            elif line and not line.startswith((b"event:", b":", b"id:", b"retry:")):
+                yield "raw", line.decode("utf-8", "replace")
+    if buf.strip():
+        b = buf.strip()
+        yield ("data", b[5:].strip().decode("utf-8", "replace")) if b.startswith(b"data:") else ("raw", b.decode("utf-8", "replace"))
+
+
+def _openai_stream(lines: Iterable[tuple[str, str]], emit: Callable[[str], None]):
+    """Assemble an OpenAI chat stream: (text, tool_calls, message, finish_reason, usage)."""
+    text, finish, usage = [], None, {}
+    slots: dict[int, dict[str, Any]] = {}
+    raw: list[str] = []
+    for kind, data in lines:
+        if kind == "raw":
+            raw.append(data)
+            continue
+        if data == "[DONE]" or not data:
+            continue
+        try:
+            j = json.loads(data)
+        except json.JSONDecodeError:
+            continue
+        if j.get("error"):
+            err = j["error"]
+            raise RouterError(f"upstream: {err.get('message', 'error') if isinstance(err, dict) else err}", retryable=True)
+        if j.get("usage"):
+            usage = j["usage"]
+        for ch in j.get("choices") or []:
+            d = ch.get("delta") or ch.get("message") or {}
+            if d.get("content"):
+                text.append(d["content"])
+                emit(d["content"])
+            for tc in d.get("tool_calls") or []:
+                slot = slots.setdefault(int(tc.get("index", len(slots))),
+                                        {"id": None, "type": "function", "function": {"name": "", "arguments": ""}})
+                if tc.get("id"):
+                    slot["id"] = tc["id"]
+                fn = tc.get("function") or {}
+                if fn.get("name"):
+                    slot["function"]["name"] = fn["name"] if fn["name"].startswith(slot["function"]["name"]) else slot["function"]["name"] + fn["name"]
+                if fn.get("arguments"):
+                    slot["function"]["arguments"] += fn["arguments"] if isinstance(fn["arguments"], str) else json.dumps(fn["arguments"])
+            finish = ch.get("finish_reason") or finish
+    if not text and not slots and raw:  # the gateway answered without streaming
+        try:
+            j = json.loads("".join(raw).replace("data: [DONE]", ""))
+        except json.JSONDecodeError:
+            raise RouterError(f"unreadable stream: {''.join(raw)[:200]}", retryable=True) from None
+        if j.get("error"):
+            err = j["error"]
+            raise RouterError(f"upstream: {err.get('message', 'error') if isinstance(err, dict) else err}", retryable=True)
+        ch = (j.get("choices") or [{}])[0]
+        m = ch.get("message") or {}
+        emit(m.get("content") or "")
+        return m.get("content") or "", list(m.get("tool_calls") or []), m, ch.get("finish_reason"), j.get("usage") or {}
+    calls = []
+    for n, (_, s) in enumerate(sorted(slots.items())):
+        s["id"] = s["id"] or f"call_stream_{int(time.time() * 1000)}_{n}"
+        s["function"]["arguments"] = s["function"]["arguments"] or "{}"
+        calls.append(s)
+    full = "".join(text)
+    message: dict[str, Any] = {"role": "assistant", "content": full or None}
+    if calls:
+        message["tool_calls"] = calls
+    return full, calls, message, finish, usage
+
+
+def _anthropic_stream(lines: Iterable[tuple[str, str]], emit: Callable[[str], None]):
+    """Assemble an Anthropic Messages stream into the OpenAI shape the agent keeps."""
+    blocks: dict[int, dict[str, Any]] = {}
+    stop, u = None, {}
+    for kind, data in lines:
+        if kind != "data" or not data:
+            continue
+        try:
+            ev = json.loads(data)
+        except json.JSONDecodeError:
+            continue
+        typ = ev.get("type")
+        if typ == "error":
+            raise RouterError(f"upstream: {ev.get('error', {}).get('message', 'error')}", retryable=True)
+        if typ == "message_start":
+            u.update((ev.get("message") or {}).get("usage") or {})
+        elif typ == "content_block_start":
+            b = dict(ev.get("content_block") or {})
+            b.setdefault("text", ""); b["_json"] = ""
+            blocks[int(ev.get("index", len(blocks)))] = b
+        elif typ == "content_block_delta":
+            b = blocks.setdefault(int(ev.get("index", 0)), {"type": "text", "text": "", "_json": ""})
+            d = ev.get("delta") or {}
+            if d.get("type") == "text_delta":
+                b["text"] += d.get("text", "")
+                emit(d.get("text", ""))
+            elif d.get("type") == "input_json_delta":
+                b["_json"] += d.get("partial_json", "")
+        elif typ == "message_delta":
+            stop = (ev.get("delta") or {}).get("stop_reason") or stop
+            u.update(ev.get("usage") or {})
+    content = []
+    for _, b in sorted(blocks.items()):
+        if b.get("type") == "tool_use":
+            try:
+                inp = json.loads(b["_json"]) if b["_json"] else (b.get("input") or {})
+            except json.JSONDecodeError:
+                inp = {}
+            content.append({"type": "tool_use", "id": b.get("id"), "name": b.get("name", ""), "input": inp})
+        elif b.get("type") == "text":
+            content.append({"type": "text", "text": b.get("text", "")})
+    text, calls, message, finish = _from_anthropic_message({"content": content, "stop_reason": stop})
+    usage = {**u, "prompt_tokens": u.get("input_tokens", 0), "completion_tokens": u.get("output_tokens", 0),
+             "total_tokens": (u.get("input_tokens", 0) or 0) + (u.get("output_tokens", 0) or 0)}
+    return text, calls, message, finish, usage
 
 
 def _openai_text_deltas(events: Iterable[str]) -> Iterator[str]:

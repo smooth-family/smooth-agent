@@ -19,7 +19,9 @@ model = "deepseek-chat"       # MODEL
 
 [agent]
 # workspace = "~/smooth-workspace"   # the folder the agent reads and writes (default ./workspace)
-max_steps = 12                        # tool rounds per message
+max_steps = 40                        # tool rounds per message
+# keep_going = 0                      # autonomous: send a model that stops early back to work, up to N times,
+                                      # until it ends with TASK COMPLETE (only after it has used tools)
 max_tokens = 1536
 # instructions = "Answer in Indonesian. Keep replies short."
 # timezone = "Asia/Jakarta"          # for schedules and "tomorrow at 9" (default: this machine's)

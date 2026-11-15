@@ -82,6 +82,10 @@ def recover_text_tool_calls(text: str) -> tuple[str, list[dict[str, Any]]]:
     return head.rstrip(), calls
 
 NOTICE = "[automatic notice, not from the user]\n"
+DONE_MARK = "TASK COMPLETE"
+KEEP_GOING = ("You stopped, but the task is not finished yet. Do not summarise or plan: do the next concrete step "
+              "now, with tools. Keep going until the whole task is really done and checked. When it is, end your "
+              "reply with the line TASK COMPLETE (only then).")
 COMPRESS_PROMPT = (
     "Summarise the conversation below so the assistant can continue the work without it. Keep: the owner's goals and "
     "instructions, decisions and their reasons, facts, numbers, names, file paths, URLs, commands that worked, what was "
@@ -97,7 +101,7 @@ class Agent:
                  skills: SkillLibrary | None = None, delegate: bool = False, delegate_steps: int = 10,
                  processes: Any = None, store: Any = None, memory: Any = None, session_id: str | None = None,
                  context_tokens: int = 64_000, keep_recent: int = 10, model: str | None = None,
-                 persona_dirs: list[Any] | None = None, max_continues: int = 2):
+                 persona_dirs: list[Any] | None = None, max_continues: int = 2, keep_going: int = 0):
         self.router = router
         self.registry = registry
         self.system = system
@@ -116,6 +120,8 @@ class Agent:
         self._recall = ""
         self.persona_dirs = list(persona_dirs or [])  # where SOUL.md, USER.md, … are looked up
         self.max_continues = max_continues            # extra calls when an answer is cut off at max_tokens
+        self.keep_going = keep_going                  # autonomous: nudges when the model stops before TASK COMPLETE
+        self.stream = False                           # stream answers as "delta" events (set by a chat channel)
         self.cancel = threading.Event()               # set from another thread (/stop) to end the turn early
         self.last_provider = ""                       # "name (model)" that answered last, for /status
         if skills is not None and registry is not None and not registry.get("skill_view"):
@@ -262,6 +268,10 @@ class Agent:
 
     # ---------- the loop ----------
 
+    def _on_delta(self, text: str | None) -> None:
+        # None: the router dropped a partial answer to try the next provider
+        self.on_event("delta_start" if text is None else "delta", {} if text is None else {"text": text})
+
     def run(self, user_message: str) -> Turn:
         if self.memory is not None:
             try:
@@ -277,6 +287,7 @@ class Agent:
         extra = {"tools": tools, "tool_choice": "auto"} if tools else {}
         used: list[dict[str, Any]] = []
         usage_total: dict[str, int] = {}
+        nudges = 0
 
         for step in range(1, self.max_steps + 1):
             if self.cancel.is_set():
@@ -284,8 +295,13 @@ class Agent:
             self._deliver_process_notices()
             self._maybe_compress()
             try:
-                c = self.router.complete(self.history, provider=self.provider, model=self.model,
-                                         max_tokens=self.max_tokens, extra=dict(extra))
+                if self.stream:
+                    self.on_event("delta_start", {})
+                    c = self.router.complete(self.history, provider=self.provider, model=self.model,
+                                             max_tokens=self.max_tokens, extra=dict(extra), on_text=self._on_delta)
+                else:
+                    c = self.router.complete(self.history, provider=self.provider, model=self.model,
+                                             max_tokens=self.max_tokens, extra=dict(extra))
             except RouterError as e:
                 self.on_event("error", {"message": str(e)})
                 return Turn(text=f"(model error: {e})", steps=step, tool_calls=used, usage=usage_total, stopped="error")
@@ -312,6 +328,15 @@ class Agent:
                 # a plain answer ends the turn
                 self._push(c.message or {"role": "assistant", "content": c.text}, c)
                 text = self._continue_if_cut(c, usage_total)
+                if (used and nudges < self.keep_going and step < self.max_steps and not self.cancel.is_set()
+                        and DONE_MARK not in (text or "")):
+                    # autonomous mode: a summary or a plan is not the end of the task
+                    nudges += 1
+                    self.on_event("keep_going", {"count": nudges, "text": text})
+                    self._push({"role": "user", "content": NOTICE + KEEP_GOING})
+                    continue
+                if self.keep_going and text and DONE_MARK in text:  # the marker is for the loop, not the reader
+                    text = text.replace(DONE_MARK, "").rstrip()
                 if text:
                     self.on_event("text", {"text": text})
                 return Turn(text=text, steps=step, tool_calls=used, usage=usage_total)
@@ -350,8 +375,9 @@ class Agent:
                     "give your best final answer now: what is done, what you found, and what is left."})
         try:
             c = self.router.complete(self.history, provider=self.provider, model=self.model, max_tokens=self.max_tokens)
-            self._push(c.message or {"role": "assistant", "content": c.text}, c)
-            return Turn(text=c.text, steps=self.max_steps, tool_calls=used, usage=usage_total, stopped="max_steps")
+            text = recover_text_tool_calls(c.text or "")[0] if _TC_START in (c.text or "") else c.text
+            self._push({"role": "assistant", "content": text} if text != c.text else (c.message or {"role": "assistant", "content": c.text}), c)
+            return Turn(text=text, steps=self.max_steps, tool_calls=used, usage=usage_total, stopped="max_steps")
         except RouterError as e:
             return Turn(text=f"(stopped after {self.max_steps} steps; {e})", steps=self.max_steps,
                         tool_calls=used, usage=usage_total, stopped="max_steps")

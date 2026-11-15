@@ -112,5 +112,49 @@ class TextToolCallTests(unittest.TestCase):
         self.assertIn("did NOT run", router.calls[-1]["messages"][-1]["content"])
 
 
+class KeepGoingTests(unittest.TestCase):
+    def _run(self, script, keep_going=3, max_steps=20):
+        reg = Registry()
+        reg.tool("ping", "ping", {"type": "object", "properties": {}})(lambda args: "pong")
+        router = StubRouter(lambda messages: script.pop(0))
+        agent = Agent(router, reg, keep_going=keep_going, max_steps=max_steps)
+        return agent.run("go"), agent
+
+    def test_stopping_with_a_plan_is_sent_back_to_work(self):
+        from smooth_agent.agent import KEEP_GOING
+        script = [call("ping", cid="a"), answer("Next: I will ping again."), call("ping", cid="b"),
+                  answer("All checked.\nTASK COMPLETE")]
+        turn, agent = self._run(script)
+        self.assertEqual(turn.text, "All checked.")
+        self.assertEqual(sum(KEEP_GOING in str(m.get("content")) for m in agent.history), 1)
+        self.assertEqual(len(turn.tool_calls), 2)
+
+    def test_a_plain_reply_without_tools_is_not_nudged(self):
+        turn, agent = self._run([answer("halo bang")])
+        self.assertEqual(turn.text, "halo bang")
+
+    def test_nudges_are_capped(self):
+        script = [call("ping", cid="a")] + [answer(f"plan {i}") for i in range(5)]
+        turn, _ = self._run(script, keep_going=2)
+        self.assertEqual(turn.text, "plan 2")
+
+    def test_off_by_default(self):
+        reg = Registry()
+        reg.tool("ping", "ping", {"type": "object", "properties": {}})(lambda args: "pong")
+        script = [call("ping"), answer("Next: more work")]
+        turn = Agent(StubRouter(lambda messages: script.pop(0)), reg).run("go")
+        self.assertEqual(turn.text, "Next: more work")
+
+
+class OutOfStepsAnswerTests(unittest.TestCase):
+    def test_leaked_markup_is_not_shown(self):
+        reg = Registry()
+        reg.tool("ping", "ping", {"type": "object", "properties": {}})(lambda args: "pong")
+        leak = answer("Here is where things stand.<|tool_call:start|>ping<|tool_arg:start|>x<|tool_arg:value|>1")
+        script = [call("ping", cid="a"), leak]
+        turn = Agent(StubRouter(lambda messages: script.pop(0)), reg, max_steps=1).run("go")
+        self.assertEqual(turn.text, "Here is where things stand.")
+
+
 if __name__ == "__main__":
     unittest.main()

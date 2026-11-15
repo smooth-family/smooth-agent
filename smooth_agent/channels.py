@@ -403,9 +403,13 @@ class TelegramChannel(Channel):
         import html
         head, _, body = text[:MAX_LEN].partition("\n")
         rows = []
+        drafting = False
         for line in body.splitlines():
             mark, sp, rest = line.partition(" ")
-            if mark in ("⏳", "✓", "✗") and sp:
+            if drafting or line.startswith("✍️"):
+                drafting = True  # the streaming answer: plain text
+                rows.append(html.escape(line))
+            elif mark in ("⏳", "✓", "✗") and sp:
                 rows.append(f"{mark} <code>{html.escape(rest)}</code>")
             else:
                 rows.append(f"<i>{html.escape(line)}</i>")
@@ -1718,6 +1722,15 @@ def _short_url(url: str) -> str:
     return re.sub(r"^https?://(www\.)?", "", url.strip()).rstrip("/")
 
 
+def _router_streams(router: Any) -> bool:
+    """True when router.complete() takes on_text (custom or test routers may not)."""
+    import inspect
+    try:
+        return "on_text" in inspect.signature(router.complete).parameters
+    except (TypeError, ValueError, AttributeError):
+        return False
+
+
 class Progress:
     """The live progress message of one turn: created on the first tool step, edited as steps
     run and finish (throttled — Telegram allows about one edit a second), deleted when the
@@ -1732,6 +1745,7 @@ class Progress:
     def __init__(self, channel: "Channel", chat_id: str, *, log: Callable[[str], None] = print):
         self.channel, self.chat_id, self.log = channel, chat_id, log
         self.steps: list[list[str]] = []  # [state, line]
+        self.draft = ""                    # the answer as it streams in
         self.msg_id: str | None = None
         self._dirty = False
         self._last_edit = 0.0
@@ -1759,16 +1773,32 @@ class Progress:
                         break
             elif event == "compressed":
                 self.steps.append(["ok", "summarised the earlier conversation"])
+            elif event == "delta":
+                self.draft += str(data.get("text", ""))
+            elif event == "delta_start":
+                if not self.draft:
+                    return
+                self.draft = ""
             else:
                 return
+            if event in ("tool", "sub:tool"):
+                self.draft = ""  # that text led into a tool call; the answer comes later
             self._dirty = True
+
+    DRAFT_CHARS = 1500  # tail of the streaming answer kept on screen (Telegram edits cap at 4096)
 
     def _render(self) -> str:
         n = len(self.steps)
         shown = self.lines[-self.SHOW:]
         head = f"⚙️ Working · {int(time.time() - self._t0)}s"
         more = [f"… {n - len(shown)} earlier steps"] if n > len(shown) else []
-        return "\n".join([head, *more, *shown])
+        out = "\n".join([head, *more, *shown])
+        draft = self.draft.split("<|tool_call", 1)[0].strip()  # never show leaked tool-call markup
+        if draft:
+            if len(draft) > self.DRAFT_CHARS:
+                draft = "…" + draft[-self.DRAFT_CHARS:]
+            out += "\n\n✍️ " + draft
+        return out
 
     def _tick(self) -> None:
         last_typing = 0.0
@@ -2001,6 +2031,11 @@ class ChannelHub:
         prev_events = getattr(agent, "on_event", None)
         if progress is not None:
             agent.on_event = progress.on_event
+        if hasattr(agent, "stream"):
+            # stream the answer into the live message when the router can and the channel does not
+            # turn it off (stream = false)
+            agent.stream = (progress is not None and _router_streams(getattr(agent, "router", None))
+                            and str(channel.cfg.options.get("stream", "on")).lower() not in ("off", "false", "0", "no"))
         try:
             text = self._receive_files(channel, inbound, progress) if inbound.attachments else inbound.text
             turn = agent.run(text)
