@@ -65,11 +65,72 @@ class Tool:
 Approver = Callable[[str, dict[str, Any]], bool]
 
 
+class PathGuard:
+    """The owner's [tools] protect / secrets lists, enforced at the tool level (not left to the model).
+
+    - secrets: never touched by any tool (read, write, or named in a command).
+    - protect: read-only for the agent: file tools may read there; write_file/patch may not; a shell
+      command naming a protected path may only read (cat, ls, grep, git log, ...), not change anything.
+    Paths may start with ~ (expanded) and are also matched as written (e.g. "~/mf/work")."""
+
+    WRITE_OPS = re.compile(
+        r"(?<![<>&0-9])>(?!&)|\btee\b|\bcp\b|\bmv\b|\brm\b|\brmdir\b|\bmkdir\b|\btouch\b|\bsed\s+-i|\bperl\s+-[a-z]*i"
+        r"|\bgit\s+(?:add|commit|reset|checkout|clean|push|apply|stash|rm|mv|restore|switch|merge|rebase|init|am)\b"
+        r"|\btar\b|\bunzip\b|\b(?:curl|wget)\b|\bchmod\b|\bchown\b|\bln\b|\bdd\b|\binstall\b|\brsync\b"
+        r"|\bpython3?\b|\bnode\b|\bnpm\b|\bnpx\b|\bpip3?\b|\bbash\b|\bsh\s|\bmake\b|\bpatch\b|\btruncate\b")
+    NOISE = re.compile(r"\d?>&\d|\d?>>?\s*/dev/null|&>\s*/dev/null")
+
+    def __init__(self, protect: list[str] | None = None, secrets: list[str] | None = None):
+        self.protect = self._forms(protect or [])
+        self.secrets = self._forms(secrets or [])
+
+    @staticmethod
+    def _forms(paths: list[str]) -> list[str]:
+        out: list[str] = []
+        for p in paths:
+            p = str(p).strip().rstrip("/")
+            if not p:
+                continue
+            for f in {p, os.path.expanduser(p)}:
+                if f not in out:
+                    out.append(f)
+        return out
+
+    def __bool__(self) -> bool:
+        return bool(self.protect or self.secrets)
+
+    @staticmethod
+    def _hits(text: str, forms: list[str]) -> str:
+        for f in forms:
+            if f and f in text:
+                return f
+        return ""
+
+    def check(self, name: str, args: dict[str, Any]) -> str:
+        """"" when the call is fine, else the reason it is refused."""
+        blob = json.dumps(args, ensure_ascii=False)
+        hit = self._hits(blob, self.secrets)
+        if hit:
+            return f"blocked: {hit} is on the owner's secrets list; no tool may read, write or name it."
+        hit = self._hits(blob, self.protect)
+        if not hit:
+            return ""
+        if name in ("write_file", "patch"):
+            return f"blocked: {hit} is read-only for this agent (the owner's protect list); do not change files there."
+        if name in ("terminal", "execute_code", "process"):
+            cmd = self.NOISE.sub(" ", str(args.get("command") or args.get("code") or ""))
+            if name == "execute_code" or self.WRITE_OPS.search(cmd):
+                return (f"blocked: {hit} is read-only for this agent (the owner's protect list). Only read there "
+                        "(cat, ls, grep, head, tail, git log/status/show); do not change, run or build anything in it.")
+        return ""
+
+
 class Registry:
     def __init__(self, approver: Approver | None = None) -> None:
         self._tools: dict[str, Tool] = {}
         # No approver = calls that need approval are refused (safe default for library use).
         self.approver = approver
+        self.guard: PathGuard | None = None  # the owner's protect / secrets lists
 
     def add(self, tool: Tool) -> None:
         self._tools[tool.name] = tool
@@ -89,6 +150,7 @@ class Registry:
 
     def copy(self, *, without: tuple[str, ...] = ()) -> "Registry":
         r = Registry(self.approver)
+        r.guard = self.guard
         for t in self._tools.values():
             if t.name not in without:
                 r.add(t)
@@ -104,6 +166,10 @@ class Registry:
         tool = self._tools.get(name)
         if not tool:
             return f"error: unknown tool '{name}'"
+        if self.guard:
+            why = self.guard.check(name, arguments or {})
+            if why:
+                return why
         if tool.needs_approval and not (self.approver and self.approver(name, arguments or {})):
             return "denied: the owner did not approve this call. Do not retry it; explain what you wanted to do instead."
         try:

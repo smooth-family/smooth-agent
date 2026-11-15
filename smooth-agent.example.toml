@@ -31,6 +31,9 @@ context_tokens = 64000                # older messages are summarised beyond ~80
 keep_recent = 10                      # messages kept word-for-word when summarising
 
 [tools]
+# protect = ["~/other-agents/work"]   # read-only for this agent: file tools may read, never write; shell commands
+#                                      # naming it may only read (cat, ls, grep, git log), enforced at the tool level
+# secrets = ["~/.config/app/key.json"] # no tool may read, write or even name these
 http = true            # web_search, web_extract, http_get
 search = "auto"        # auto: Tavily / Brave / SearXNG when TAVILY_API_KEY / BRAVE_API_KEY / SEARXNG_URL is set, else DuckDuckGo
 terminal = false       # shell commands + Python on this machine (as your user), and background processes

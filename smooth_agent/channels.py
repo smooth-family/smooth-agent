@@ -1646,6 +1646,15 @@ YES = {"y", "yes", "ya", "iya", "ok", "oke", "okay", "boleh", "allow", "lanjut",
 NO = {"n", "no", "tidak", "nggak", "ngga", "gak", "ga", "jangan", "deny", "stop", "batal", "❌"}
 
 
+_ICON = {
+    "terminal": "💻", "execute_code": "🐍", "process": "⚙️", "read_file": "📖", "write_file": "✏️", "patch": "✏️",
+    "list_dir": "📂", "search_files": "🔎", "web_search": "🔎", "web_extract": "🌐", "http_get": "🌐",
+    "memory": "🧠", "session_search": "🧠", "skill_view": "🧩", "skills_list": "🧩", "skill_manage": "🧩",
+    "delegate_task": "🤖", "cronjob": "⏰", "send_message": "💬", "todo": "📝", "clarify": "❓",
+    "vision_analyze": "👁", "image_generate": "🎨", "text_to_speech": "🔊", "now": "🕒", "transcribe_audio": "🎧",
+}
+
+
 def describe_step(name: str, args: dict[str, Any]) -> str:
     """A tool call as a shell-style line: `$ git pull`, `read app.py`, `write app.py`, `open https://…`."""
     a = args if isinstance(args, dict) else {}
@@ -1702,6 +1711,11 @@ def describe_step(name: str, args: dict[str, Any]) -> str:
         line = f"{name} {g('path', 'query', 'url', 'name', 'action')}"
     line = " ".join(line.split())
     return line if len(line) <= 64 else line[:63] + "…"
+
+
+def step_icon(name: str) -> str:
+    """An emoji for the kind of tool, shown before each live step (💻 shell, 📖 read, ✏️ write, …)."""
+    return _ICON.get(name) or ("🌐" if name.startswith("browser_") else "🔌" if name.startswith("mcp_") else "🛠")
 
 
 def _short_command(cmd: str) -> str:
@@ -1762,7 +1776,7 @@ class Progress:
     def on_event(self, event: str, data: dict[str, Any]) -> None:
         with self._lock:
             if event in ("tool", "sub:tool"):
-                line = describe_step(data.get("name", ""), data.get("arguments") or {})
+                line = step_icon(data.get("name", "")) + " " + describe_step(data.get("name", ""), data.get("arguments") or {})
                 self.steps.append(["run", ("↳ " if event == "sub:tool" else "") + line])
             elif event in ("tool_result", "sub:tool_result"):
                 res = str(data.get("result", ""))
@@ -1774,7 +1788,18 @@ class Progress:
             elif event == "compressed":
                 self.steps.append(["ok", "summarised the earlier conversation"])
             elif event == "retry":
-                self.steps.append(["ok", f"model busy, trying again in {int(data.get('wait', 0))}s"])
+                self.steps.append(["ok", f"⏸ model busy, trying again in {int(data.get('wait', 0))}s"])
+            elif event == "steered":
+                self.steps.append(["ok", "↪ added your new message to this task"])
+            elif event == "interim":
+                text = str(data.get("text", "")).strip()
+                if text and getattr(self.channel, "interim", True):
+                    try:  # what the model says between steps, as its own message (like a person narrating)
+                        self.channel.send(self.chat_id, text)
+                    except Exception as e:
+                        self.log(f"{self.channel.name}: interim message failed: {e}")
+                self.draft = ""
+                return
             elif event == "delta":
                 self.draft += str(data.get("text", ""))
             elif event == "delta_start":
@@ -1914,7 +1939,26 @@ class ChannelHub:
             if word in YES or word in NO:
                 self.resolve_approval(key, word in YES)
                 return
+        if self._steer(channel, inbound):
+            return
         self._q.put((channel, inbound))
+
+    def _steer(self, channel: "Channel", inbound: "Inbound") -> bool:
+        """A message for the chat whose turn is running now goes into that turn (like a person adding
+        a correction mid-task) instead of waiting behind it. Off with [channels.<name>] steer = false."""
+        a = self._active
+        if (not a or a[0].name != channel.name or a[1] != inbound.chat_id or inbound.attachments
+                or str(channel.cfg.options.get("steer", "on")).lower() in ("off", "false", "0", "no")):
+            return False
+        agent = self._agents.get(f"{channel.name}-{inbound.chat_id}")
+        if agent is None or not getattr(agent, "running", False) or not hasattr(agent, "steer"):
+            return False
+        agent.steer(inbound.text)
+        try:
+            channel.send(inbound.chat_id, "↪ Noted, adding that to what I'm doing now.")
+        except Exception:
+            pass
+        return True
 
     def resolve_approval(self, key: str, ok: bool) -> None:
         p = self._pending.get(key)
@@ -2054,6 +2098,9 @@ class ChannelHub:
             if progress is not None:
                 agent.on_event = prev_events
                 progress.finish()
+            for late in (agent.take_inbox() if hasattr(agent, "take_inbox") else []):
+                self._q.put((channel, Inbound(channel=inbound.channel, chat_id=inbound.chat_id, text=late,
+                                              user_id=inbound.user_id, name=inbound.name)))
         try:
             channel.send(inbound.chat_id, reply)
         except Exception as e:

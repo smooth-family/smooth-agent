@@ -95,6 +95,8 @@ class Settings:
     optional_skills: bool = False
     enable_skills: list[str] = field(default_factory=list)
     skill_dirs: list[str] = field(default_factory=list)
+    protect: list[str] = field(default_factory=list)  # read-only for the agent's tools
+    secrets: list[str] = field(default_factory=list)  # no tool may touch these at all
 
     @classmethod
     def from_config(cls, cfg: dict[str, Any]) -> "Settings":
@@ -110,6 +112,7 @@ class Settings:
             delegate=bool(t.get("delegate", True)), delegate_steps=int(t.get("delegate_steps", 10)),
             skills=bool(t.get("skills", True)), optional_skills=bool(t.get("optional_skills", False)),
             enable_skills=[str(x) for x in t.get("enable_skills", [])], skill_dirs=[str(x) for x in t.get("skill_dirs", [])],
+            protect=[str(x) for x in t.get("protect", [])], secrets=[str(x) for x in t.get("secrets", [])],
         )
 
 

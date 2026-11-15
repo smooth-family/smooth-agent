@@ -125,6 +125,8 @@ class Agent:
         self.stream = False                           # stream answers as "delta" events (set by a chat channel)
         self.retry_seconds = retry_seconds            # wait this long in total on busy/rate-limited models
         self.retry_first, self.retry_max = 5, 60      # seconds between those tries: 5, 10, 20, 40, 60, …
+        self._inbox: list[str] = []                   # owner messages that arrived during a turn (steer())
+        self.running = False
         self.cancel = threading.Event()               # set from another thread (/stop) to end the turn early
         self.last_provider = ""                       # "name (model)" that answered last, for /status
         if skills is not None and registry is not None and not registry.get("skill_view"):
@@ -294,6 +296,25 @@ class Agent:
                 waited += pause
                 delay = min(delay * 2, self.retry_max)
 
+    def steer(self, text: str) -> None:
+        """Add an owner message to the turn that is running now; it is read before the next model call."""
+        self._inbox.append(text)
+
+    def take_inbox(self) -> list[str]:
+        """Messages steer() got that no step read (the turn ended first): the caller handles them as new turns."""
+        out, self._inbox[:] = list(self._inbox), []
+        return out
+
+    def _read_inbox(self) -> bool:
+        got = False
+        while self._inbox:
+            msg = self._inbox.pop(0)
+            self._push({"role": "user", "content": "(The owner sent this while you were working; take it into "
+                        "account now:)\n" + msg})
+            self.on_event("steered", {"text": msg})
+            got = True
+        return got
+
     def _on_delta(self, text: str | None) -> None:
         # None: the router dropped a partial answer to try the next provider
         self.on_event("delta_start" if text is None else "delta", {} if text is None else {"text": text})
@@ -309,6 +330,13 @@ class Agent:
             self.history[0] = {"role": "system", "content": self._system_prompt()}
         self.cancel.clear()
         self._push({"role": "user", "content": user_message})
+        self.running = True
+        try:
+            return self._run_loop()
+        finally:
+            self.running = False
+
+    def _run_loop(self) -> Turn:
         tools = self.registry.schemas() if self.registry else None
         extra = {"tools": tools, "tool_choice": "auto"} if tools else {}
         used: list[dict[str, Any]] = []
@@ -318,6 +346,7 @@ class Agent:
         for step in range(1, self.max_steps + 1):
             if self.cancel.is_set():
                 return self._cancelled(step, used, usage_total)
+            self._read_inbox()
             self._deliver_process_notices()
             self._maybe_compress()
             try:
@@ -357,6 +386,9 @@ class Agent:
                     self.on_event("keep_going", {"count": nudges, "text": text})
                     self._push({"role": "user", "content": NOTICE + KEEP_GOING})
                     continue
+                if self._inbox and step < self.max_steps:  # the owner added something while this answer was written
+                    self._read_inbox()
+                    continue
                 if self.keep_going and text and DONE_MARK in text:  # the marker is for the loop, not the reader
                     text = text.replace(DONE_MARK, "").rstrip()
                 if text:
@@ -365,6 +397,9 @@ class Agent:
 
             # record the assistant's tool-call message, then run each call
             self._push(c.message or {"role": "assistant", "content": c.text or None, "tool_calls": c.tool_calls}, c)
+            interim = (c.text or "").split(_TC_START, 1)[0].strip()
+            if interim:  # what the model said before its tool calls: worth showing as it happens
+                self.on_event("interim", {"text": interim})
             for call in c.tool_calls:
                 fn = (call.get("function") or {})
                 name = fn.get("name", "")

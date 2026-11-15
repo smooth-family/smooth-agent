@@ -84,6 +84,9 @@ def build_runtime(config_path: str | None = None, *, approver: Approver | None =
     reg = default_registry(ws, allow_http=st.http, terminal=st.terminal, code=st.code, terminal_timeout=st.timeout,
                            secret_env_names=secret_envs, approver=approver, search_backend=st.search,
                            processes=pm if st.terminal else None)
+    if st.protect or st.secrets:
+        from .tools import PathGuard
+        reg.guard = PathGuard(st.protect, st.secrets)
     if st.terminal:
         add_process_tools(reg, pm)
 

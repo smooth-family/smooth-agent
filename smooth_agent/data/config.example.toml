@@ -32,6 +32,9 @@ context_tokens = 64000                # older messages are summarised beyond ~80
 keep_recent = 10                      # messages kept word-for-word when summarising
 
 [tools]
+# protect = ["~/other-agents/work"]   # read-only for this agent: file tools may read, never write; shell commands
+#                                      # naming it may only read (cat, ls, grep, git log), enforced at the tool level
+# secrets = ["~/.config/app/key.json"] # no tool may read, write or even name these
 http = true            # web_search, web_extract, http_get
 search = "auto"        # auto: Tavily / Brave / SearXNG when TAVILY_API_KEY / BRAVE_API_KEY / SEARXNG_URL is set, else DuckDuckGo
 files = "workspace"    # "full" = file tools reach the whole machine; writes outside the workspace
@@ -81,6 +84,7 @@ webhook_port = 8808    # inbound webhook server (WhatsApp); expose it with a rev
 # auto_approve = false               # approve the owner's tool calls without a button tap
 # voice_replies = "auto"            # off | auto (voice note in -> voice note back) | always; needs [tts] + ffmpeg
 # stream = "on"                     # stream the answer into the live progress message as it is written
+# steer = "on"                      # a message sent while a task runs is added to that task ("↪ Noted") instead of waiting
 
 # [channels.whatsapp]                # Meta WhatsApp Cloud API; point the webhook at <host>/webhook/whatsapp
 # token_env = "WHATSAPP_TOKEN"

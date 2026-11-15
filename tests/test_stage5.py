@@ -207,8 +207,8 @@ class ProgressTests(unittest.TestCase):
         self.assertTrue(wait_for(lambda: ch.edits))
         p.finish()
         self.assertIn("search berita AI", ch.posts[0])
-        self.assertIn("✗ read a.md", ch.edits[-1])
-        self.assertIn("⏳ search berita AI", ch.edits[-1])  # no result yet: still running
+        self.assertIn("✗ 📖 read a.md", ch.edits[-1])
+        self.assertIn("⏳ 🔎 search berita AI", ch.edits[-1])  # no result yet: still running
         self.assertEqual(ch.deleted, ["m1"])
 
     def test_failed_command_is_marked(self):
@@ -217,9 +217,9 @@ class ProgressTests(unittest.TestCase):
         p.on_event("tool", {"name": "terminal", "arguments": {"command": "false"}})
         p.on_event("tool_result", {"name": "terminal", "result": "[exit 1]\n"})
         p.on_event("tool", {"name": "terminal", "arguments": {"command": "true"}})
-        self.assertEqual(p.lines, ["✗ $ false", "⏳ $ true"])
+        self.assertEqual(p.lines, ["✗ 💻 $ false", "⏳ 💻 $ true"])
         p.on_event("tool_result", {"name": "terminal", "result": "[exit 0]\n"})
-        self.assertEqual(p.lines[-1], "✓ $ true")
+        self.assertEqual(p.lines[-1], "✓ 💻 $ true")
         p.finish()
 
     def test_no_message_when_no_tools(self):
