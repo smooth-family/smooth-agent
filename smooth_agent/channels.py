@@ -1773,6 +1773,8 @@ class Progress:
                         break
             elif event == "compressed":
                 self.steps.append(["ok", "summarised the earlier conversation"])
+            elif event == "retry":
+                self.steps.append(["ok", f"model busy, trying again in {int(data.get('wait', 0))}s"])
             elif event == "delta":
                 self.draft += str(data.get("text", ""))
             elif event == "delta_start":

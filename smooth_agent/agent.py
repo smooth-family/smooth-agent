@@ -101,7 +101,8 @@ class Agent:
                  skills: SkillLibrary | None = None, delegate: bool = False, delegate_steps: int = 10,
                  processes: Any = None, store: Any = None, memory: Any = None, session_id: str | None = None,
                  context_tokens: int = 64_000, keep_recent: int = 10, model: str | None = None,
-                 persona_dirs: list[Any] | None = None, max_continues: int = 2, keep_going: int = 0):
+                 persona_dirs: list[Any] | None = None, max_continues: int = 2, keep_going: int = 0,
+                 retry_seconds: int = 180):
         self.router = router
         self.registry = registry
         self.system = system
@@ -122,6 +123,8 @@ class Agent:
         self.max_continues = max_continues            # extra calls when an answer is cut off at max_tokens
         self.keep_going = keep_going                  # autonomous: nudges when the model stops before TASK COMPLETE
         self.stream = False                           # stream answers as "delta" events (set by a chat channel)
+        self.retry_seconds = retry_seconds            # wait this long in total on busy/rate-limited models
+        self.retry_first, self.retry_max = 5, 60      # seconds between those tries: 5, 10, 20, 40, 60, …
         self.cancel = threading.Event()               # set from another thread (/stop) to end the turn early
         self.last_provider = ""                       # "name (model)" that answered last, for /status
         if skills is not None and registry is not None and not registry.get("skill_view"):
@@ -268,6 +271,29 @@ class Agent:
 
     # ---------- the loop ----------
 
+    def _complete_patiently(self, extra: dict[str, Any]) -> Any:
+        """One model call. When every provider is busy or rate-limited (a retryable error), wait and
+        try again (5 s, doubling to 60 s) for up to retry_seconds in total, so a long task keeps its
+        session instead of failing on a brief limit. None if the turn was cancelled while waiting."""
+        waited, delay = 0, self.retry_first
+        while True:
+            try:
+                if self.stream:
+                    self.on_event("delta_start", {})
+                    return self.router.complete(self.history, provider=self.provider, model=self.model,
+                                                max_tokens=self.max_tokens, extra=dict(extra), on_text=self._on_delta)
+                return self.router.complete(self.history, provider=self.provider, model=self.model,
+                                            max_tokens=self.max_tokens, extra=dict(extra))
+            except RouterError as e:
+                if not getattr(e, "retryable", False) or waited >= self.retry_seconds:
+                    raise
+                pause = min(delay, max(1, self.retry_seconds - waited))
+                self.on_event("retry", {"message": str(e), "wait": pause})
+                if self.cancel.wait(pause):
+                    return None
+                waited += pause
+                delay = min(delay * 2, self.retry_max)
+
     def _on_delta(self, text: str | None) -> None:
         # None: the router dropped a partial answer to try the next provider
         self.on_event("delta_start" if text is None else "delta", {} if text is None else {"text": text})
@@ -295,16 +321,12 @@ class Agent:
             self._deliver_process_notices()
             self._maybe_compress()
             try:
-                if self.stream:
-                    self.on_event("delta_start", {})
-                    c = self.router.complete(self.history, provider=self.provider, model=self.model,
-                                             max_tokens=self.max_tokens, extra=dict(extra), on_text=self._on_delta)
-                else:
-                    c = self.router.complete(self.history, provider=self.provider, model=self.model,
-                                             max_tokens=self.max_tokens, extra=dict(extra))
+                c = self._complete_patiently(extra)
             except RouterError as e:
                 self.on_event("error", {"message": str(e)})
                 return Turn(text=f"(model error: {e})", steps=step, tool_calls=used, usage=usage_total, stopped="error")
+            if c is None:  # /stop while waiting for a busy model
+                return self._cancelled(step, used, usage_total)
 
             self._count(c, usage_total)
 

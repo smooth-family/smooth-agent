@@ -156,5 +156,51 @@ class OutOfStepsAnswerTests(unittest.TestCase):
         self.assertEqual(turn.text, "Here is where things stand.")
 
 
+class PatientRetryTests(unittest.TestCase):
+    def _agent(self, outcomes, retry_seconds=60):
+        from smooth_agent.routers import RouterError
+
+        def script(messages):
+            o = outcomes.pop(0)
+            if isinstance(o, Exception):
+                raise o
+            return o
+        events = []
+        agent = Agent(StubRouter(script), Registry(), retry_seconds=retry_seconds,
+                      on_event=lambda e, d: events.append(e))
+        agent.retry_first, agent.retry_max = 0.01, 0.02
+        return agent, events, RouterError
+
+    def test_busy_then_answer(self):
+        from smooth_agent.routers import RouterError
+        busy = RouterError("HTTP 503: All providers busy", status=503, retryable=True)
+        agent, events, _ = self._agent([busy, busy, answer("done")])
+        self.assertEqual(agent.run("go").text, "done")
+        self.assertEqual(events.count("retry"), 2)
+
+    def test_not_retryable_fails_at_once(self):
+        from smooth_agent.routers import RouterError
+        agent, events, _ = self._agent([RouterError("HTTP 401: bad key", status=401), answer("never")])
+        turn = agent.run("go")
+        self.assertEqual(turn.stopped, "error")
+        self.assertEqual(events.count("retry"), 0)
+
+    def test_gives_up_after_retry_seconds(self):
+        from smooth_agent.routers import RouterError
+        busy = RouterError("HTTP 429", status=429, retryable=True)
+        agent, events, _ = self._agent([busy] * 50, retry_seconds=0.05)
+        self.assertEqual(agent.run("go").stopped, "error")
+        self.assertGreaterEqual(events.count("retry"), 1)
+
+    def test_stop_while_waiting(self):
+        import threading
+        from smooth_agent.routers import RouterError
+        busy = RouterError("HTTP 429", status=429, retryable=True)
+        agent, events, _ = self._agent([busy] * 50, retry_seconds=60)
+        agent.retry_first = agent.retry_max = 30
+        threading.Timer(0.2, agent.cancel.set).start()
+        self.assertEqual(agent.run("go").stopped, "cancelled")
+
+
 if __name__ == "__main__":
     unittest.main()
