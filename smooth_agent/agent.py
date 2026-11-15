@@ -51,6 +51,36 @@ class Turn:
     stopped: str | None = None  # set if the loop hit a limit instead of finishing
 
 
+
+# Some gateways pass a model's native tool-call markup through as plain text instead of tool_calls,
+# e.g. "<|tool_call:start|>write_file<|tool_arg:start|>path<|tool_arg:value|>a.py<|tool_arg:start|>...".
+_TC_START, _ARG_START, _ARG_VALUE = "<|tool_call:start|>", "<|tool_arg:start|>", "<|tool_arg:value|>"
+_TC_ENDS = ("<|tool_call:end|>", "<|tool_arg:end|>")
+
+
+def recover_text_tool_calls(text: str) -> tuple[str, list[dict[str, Any]]]:
+    """Split leaked tool-call markup out of an answer: (text before it, OpenAI-shape tool calls)."""
+    if not text or _TC_START not in text:
+        return text, []
+    head, *chunks = text.split(_TC_START)
+    calls = []
+    for n, chunk in enumerate(chunks):
+        for end in _TC_ENDS:
+            chunk = chunk.replace(end, "")
+        name, *args = chunk.split(_ARG_START)
+        name = name.strip()
+        if not name or not name.replace("_", "").replace("-", "").isalnum():
+            continue
+        values: dict[str, Any] = {}
+        for a in args:
+            if _ARG_VALUE not in a:
+                continue
+            k, v = a.split(_ARG_VALUE, 1)
+            values[k.strip()] = v
+        calls.append({"id": f"call_text_{int(time.time() * 1000)}_{n}", "type": "function",
+                      "function": {"name": name, "arguments": json.dumps(values)}})
+    return head.rstrip(), calls
+
 NOTICE = "[automatic notice, not from the user]\n"
 COMPRESS_PROMPT = (
     "Summarise the conversation below so the assistant can continue the work without it. Keep: the owner's goals and "
@@ -261,6 +291,22 @@ class Agent:
                 return Turn(text=f"(model error: {e})", steps=step, tool_calls=used, usage=usage_total, stopped="error")
 
             self._count(c, usage_total)
+
+            if not c.tool_calls and _TC_START in (c.text or ""):
+                head, calls = recover_text_tool_calls(c.text)
+                if calls and c.finish_reason != "length":
+                    # the model did call a tool, the gateway just did not parse it: run it as one
+                    c.tool_calls = calls
+                    c.message = {"role": "assistant", "content": head or None, "tool_calls": calls}
+                    self.on_event("error", {"message": f"recovered {len(calls)} tool call(s) sent as text"})
+                else:
+                    # cut off mid-call (usually a very large file): the call cannot run, so say why and go on
+                    self._push({"role": "assistant", "content": head or "(tool call cut off)"}, c)
+                    self._push({"role": "user", "content": NOTICE + "Your last tool call came out as text and was "
+                                "cut off before it finished, so it did NOT run. Call the tool again. For a large "
+                                "file, write it in parts: write_file the first part, then add the rest in more "
+                                "calls (patch, or terminal with cat >> file)."})
+                    continue
 
             if not c.tool_calls:
                 # a plain answer ends the turn

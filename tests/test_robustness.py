@@ -1,4 +1,5 @@
-"""Tool-argument tolerance, the repeated-call notice, and provider usage kept in the session record."""
+"""Tool-argument tolerance, the repeated-call notice, provider usage in the session record, and tool calls a gateway leaked as text."""
+import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -75,6 +76,40 @@ class UsageRecordTests(unittest.TestCase):
         again = Agent(StubRouter(lambda messages: answer("ok")), reg, store=store)
         again.resume("s1")
         self.assertFalse(any(k.startswith("_") for m in again.history for k in m))
+
+
+class TextToolCallTests(unittest.TestCase):
+    MARK = ("Writing it now.<|tool_call:start|>write_file<|tool_arg:start|>path<|tool_arg:value|>a.txt"
+            "<|tool_arg:start|>content<|tool_arg:value|>hello\nworld")
+
+    def test_parse(self):
+        from smooth_agent.agent import recover_text_tool_calls
+        head, calls = recover_text_tool_calls(self.MARK)
+        self.assertEqual(head, "Writing it now.")
+        self.assertEqual(calls[0]["function"]["name"], "write_file")
+        self.assertEqual(json.loads(calls[0]["function"]["arguments"]), {"path": "a.txt", "content": "hello\nworld"})
+
+    def _agent(self, finish):
+        got = []
+        reg = Registry()
+        reg.tool("write_file", "w", {"type": "object", "properties": {}})(lambda args: got.append(args) or "wrote")
+        first = Completion(text=self.MARK, model="m", provider="main", finish_reason=finish,
+                           message={"role": "assistant", "content": self.MARK})
+        script = [first, answer("done")]
+        router = StubRouter(lambda messages: script.pop(0))
+        turn = Agent(router, reg).run("go")
+        return turn, got, router
+
+    def test_complete_text_call_runs(self):
+        turn, got, _ = self._agent("stop")
+        self.assertEqual(got, [{"path": "a.txt", "content": "hello\nworld"}])
+        self.assertEqual(turn.text, "done")
+
+    def test_cut_off_text_call_does_not_run_and_turn_continues(self):
+        turn, got, router = self._agent("length")
+        self.assertEqual(got, [])
+        self.assertEqual(turn.text, "done")
+        self.assertIn("did NOT run", router.calls[-1]["messages"][-1]["content"])
 
 
 if __name__ == "__main__":
