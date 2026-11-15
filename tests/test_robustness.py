@@ -202,5 +202,27 @@ class PatientRetryTests(unittest.TestCase):
         self.assertEqual(agent.run("go").stopped, "cancelled")
 
 
+class SmartKeepGoingTests(unittest.TestCase):
+    def _run(self, replies):
+        reg = Registry()
+        reg.tool("ping", "ping", {"type": "object", "properties": {}})(lambda args: "pong")
+        script = [call("ping", cid="a")] + [answer(r) for r in replies]
+        return Agent(StubRouter(lambda m: script.pop(0)), reg, keep_going=3, keep_going_mode="smart").run("go")
+
+    def test_a_finished_answer_is_not_nudged(self):
+        self.assertEqual(self._run(["Sekarang jam 15:40 UTC di server.", "never"]).text, "Sekarang jam 15:40 UTC di server.")
+
+    def test_a_plan_is_nudged(self):
+        self.assertEqual(self._run(["Selanjutnya saya akan cek log-nya.", "Log bersih, semua jalan."]).text,
+                         "Log bersih, semua jalan.")
+
+    def test_unfinished_detector(self):
+        from smooth_agent.agent import looks_unfinished
+        for s in ["Next: copy the starter", "I'll check the logs now.", "Let me look", "langkah berikut:", "sebentar ya"]:
+            self.assertTrue(looks_unfinished(s), s)
+        for s in ["Hasilnya 3367.", "Done: 3 files listed.", "Harga BTC sekarang $97,120 (CoinGecko)."]:
+            self.assertFalse(looks_unfinished(s), s)
+
+
 if __name__ == "__main__":
     unittest.main()

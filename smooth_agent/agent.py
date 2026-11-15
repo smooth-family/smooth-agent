@@ -12,6 +12,7 @@ stages (see ROADMAP.md).
 from __future__ import annotations
 
 import json
+import re
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -83,6 +84,20 @@ def recover_text_tool_calls(text: str) -> tuple[str, list[dict[str, Any]]]:
 
 NOTICE = "[automatic notice, not from the user]\n"
 DONE_MARK = "TASK COMPLETE"
+_UNFINISHED = re.compile(
+    r"(?i)(\bnext\s*(step)?\s*:|\bI(?:'ll| will| am going to)\b|\blet me\b|\bnow I\b|\bthen I\b|\bTODO\b"
+    r"|\bselanjutnya\b|\bsaya akan\b|\baku akan\b|\bakan (?:saya|aku|gue)\b|\blanjut(?:kan)?\b|\bsekarang (?:saya|aku|gue)\b"
+    r"|\bberikutnya\b|\bnanti\b|\bsebentar\b|\btunggu\b|\bmasih (?:proses|jalan)\b)")
+
+
+def looks_unfinished(text: str) -> bool:
+    """A reply that reads like a plan or a promise rather than a result ("Next: ...", "I'll ...", "saya akan ...",
+    or one that ends mid-list with ':' / '...')."""
+    t = (text or "").strip()
+    if not t:
+        return True
+    tail = t[-600:]
+    return bool(_UNFINISHED.search(tail)) or t.endswith((":", "...", "…"))
 KEEP_GOING = ("You stopped, but the task is not finished yet. Do not summarise or plan: do the next concrete step "
               "now, with tools. Keep going until the whole task is really done and checked. When it is, end your "
               "reply with the line TASK COMPLETE (only then).")
@@ -102,7 +117,7 @@ class Agent:
                  processes: Any = None, store: Any = None, memory: Any = None, session_id: str | None = None,
                  context_tokens: int = 64_000, keep_recent: int = 10, model: str | None = None,
                  persona_dirs: list[Any] | None = None, max_continues: int = 2, keep_going: int = 0,
-                 retry_seconds: int = 180):
+                 retry_seconds: int = 180, keep_going_mode: str = "marker"):
         self.router = router
         self.registry = registry
         self.system = system
@@ -122,6 +137,7 @@ class Agent:
         self.persona_dirs = list(persona_dirs or [])  # where SOUL.md, USER.md, … are looked up
         self.max_continues = max_continues            # extra calls when an answer is cut off at max_tokens
         self.keep_going = keep_going                  # autonomous: nudges when the model stops before TASK COMPLETE
+        self.keep_going_mode = keep_going_mode        # "marker": until TASK COMPLETE; "smart": only plans/promises
         self.stream = False                           # stream answers as "delta" events (set by a chat channel)
         self.retry_seconds = retry_seconds            # wait this long in total on busy/rate-limited models
         self.retry_first, self.retry_max = 5, 60      # seconds between those tries: 5, 10, 20, 40, 60, …
@@ -380,7 +396,8 @@ class Agent:
                 self._push(c.message or {"role": "assistant", "content": c.text}, c)
                 text = self._continue_if_cut(c, usage_total)
                 if (used and nudges < self.keep_going and step < self.max_steps and not self.cancel.is_set()
-                        and DONE_MARK not in (text or "")):
+                        and DONE_MARK not in (text or "")
+                        and (self.keep_going_mode != "smart" or looks_unfinished(text or ""))):
                     # autonomous mode: a summary or a plan is not the end of the task
                     nudges += 1
                     self.on_event("keep_going", {"count": nudges, "text": text})
